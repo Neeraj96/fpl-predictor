@@ -148,26 +148,30 @@ def main():
         "Price Importance", 
         0.0, 1.0, 0.5,
         help="0.0 = Performance Only. 1.0 = Value Only.",
-        on_change=reset_page
+        on_change=reset_page,
+        key="w_price_global" # Added unique key
     )
     
     # ATTRIBUTE WEIGHTS
     st.sidebar.subheader("Algorithm Tweaks")
     with st.sidebar.expander("GK & Defender Settings", expanded=False):
-        w_cs = st.slider("Clean Sheet / Solidity", 0.1, 1.0, 0.5, on_change=reset_page)
-        w_ppm_def = st.slider("Form (PPM)", 0.1, 1.0, 0.5, on_change=reset_page)
-        w_fix_def = st.slider("Fixture Ease", 0.1, 1.0, 0.5, on_change=reset_page)
+        # Added unique keys (key="def_...") to prevent duplicates
+        w_cs = st.slider("Clean Sheet / Solidity", 0.1, 1.0, 0.5, on_change=reset_page, key="def_cs")
+        w_ppm_def = st.slider("Form (PPM)", 0.1, 1.0, 0.5, on_change=reset_page, key="def_ppm")
+        w_fix_def = st.slider("Fixture Ease", 0.1, 1.0, 0.5, on_change=reset_page, key="def_fix")
 
     with st.sidebar.expander("Mid & Attacker Settings", expanded=False):
-        w_xgi = st.slider("Attacking Threat (xGI)", 0.1, 1.0, 0.5, on_change=reset_page)
-        w_ppm_att = st.slider("Form (PPM)", 0.1, 1.0, 0.5, on_change=reset_page)
-        w_fix_att = st.slider("Fixture Ease", 0.1, 1.0, 0.5, on_change=reset_page)
+        # Added unique keys (key="att_...") to prevent duplicates
+        w_xgi = st.slider("Attacking Threat (xGI)", 0.1, 1.0, 0.5, on_change=reset_page, key="att_xgi")
+        w_ppm_att = st.slider("Form (PPM)", 0.1, 1.0, 0.5, on_change=reset_page, key="att_ppm")
+        w_fix_att = st.slider("Fixture Ease", 0.1, 1.0, 0.5, on_change=reset_page, key="att_fix")
 
     st.sidebar.divider()
     min_minutes = st.sidebar.slider(
         "Min. Minutes Played", 0, 2000, 0, 
         help="Set to 0 to analyze ALL players.",
-        on_change=reset_page
+        on_change=reset_page,
+        key="w_min_mins" # Added unique key
     )
 
     # --- ANALYSIS ---
@@ -198,48 +202,30 @@ def main():
                 # --- ALGORITHMS BY POSITION ---
                 
                 if pos_category == "GK":
-                    # GK Logic: PPM + Saves + Clean Sheet Potential (Inverse xGC)
-                    # Note: xGC is bad for CS, but High xGC often leads to Save Points.
-                    # Hybrid Score: 
-                    # 1. Save Potential (Saves/90)
-                    # 2. Team Strength (For CS)
-                    
-                    cs_potential = (10 - (xgc_90 * 3)) # Approx inversion (Lower xGC is better)
+                    # GK Logic
+                    cs_potential = (10 - (xgc_90 * 3)) 
                     cs_potential = max(0, cs_potential) + (team_def_strength[tid] / 2)
                     
-                    # Base Score
                     base_score = (cs_potential * w_cs) + (saves_90 * 20 * 0.2) + (ppm * w_ppm_def) + (future_score * w_fix_def)
-                    
-                    # Projection
                     base_strength = (ppm * 0.6) + (saves_90 * 3) + (cs_potential * 0.1)
                     
                 elif pos_category == "DEF":
-                    # DEF Logic: PPM + xGI (Attack) + xGC (Defense/Solidty)
-                    # "Defensive Contribution" approximated by inverse xGC
-                    def_solidity = max(0, (2.5 - xgc_90) * 4) # Scale 0-10
-                    
+                    # DEF Logic
+                    def_solidity = max(0, (2.5 - xgc_90) * 4) 
                     att_threat = xgi_90 * 10
                     
                     base_score = (def_solidity * w_cs) + (att_threat * 0.3) + (ppm * w_ppm_def) + (future_score * w_fix_def)
-                    
-                    # Projection
                     base_strength = (ppm * 0.6) + (xgi_90 * 5) + (def_solidity * 0.2)
 
                 elif pos_category == "MID":
-                    # MID Logic: PPM + xGI + Slight Defensive Penalty
-                    # Mids get CS points, so xGC matters slightly
+                    # MID Logic
                     def_solidity = max(0, (3.0 - xgc_90) * 2)
-                    
                     base_score = ((xgi_90 * 10) * w_xgi) + (ppm * w_ppm_att) + (future_score * w_fix_att) + (def_solidity * 0.1)
-                    
-                    # Projection
                     base_strength = (ppm * 0.7) + (xgi_90 * 8)
                     
                 else: # FWD
-                    # FWD Logic: Pure Attack
+                    # FWD Logic
                     base_score = ((xgi_90 * 10) * w_xgi) + (ppm * w_ppm_att) + (future_score * w_fix_att)
-                    
-                    # Projection
                     base_strength = (ppm * 0.7) + (xgi_90 * 9)
 
                 # 3. PREDICTED POINTS CALCULATION
@@ -320,7 +306,6 @@ def main():
             "PPM": st.column_config.NumberColumn("Pts/G", format="%.1f"),
         }
         
-        # Add specific stat columns
         if pos_category == "GK":
             df_final = df_display[["ROI Index", "Name", "Team", "Exp. Pts", "Price", "Saves", "xGC", "Upcoming Fixtures", "PPM"]]
             base_cols["Saves"] = st.column_config.NumberColumn("Saves/90", format="%.2f")
