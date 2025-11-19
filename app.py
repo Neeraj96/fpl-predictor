@@ -116,7 +116,7 @@ def min_max_scale(series):
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("### Weighted Model with Point Projections")
+    st.markdown("<h3>Weighted Model with Point Projections</h3>", unsafe_allow_html=True)
 
     data, fixtures = load_data()
     if not data or not fixtures:
@@ -327,3 +327,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
