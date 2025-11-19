@@ -265,4 +265,7 @@ def main():
     with tab_fwd:
         df_fwd = run_analysis([4], is_defense=False)
         if not df_fwd.empty:
-            st.dataframe(df_fwd, hide_index=True, column_config=col_config, use_container_widt
+            st.dataframe(df_fwd, hide_index=True, column_config=col_config, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
