@@ -116,7 +116,7 @@ def min_max_scale(series):
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("<h3>Weighted Model with Point Projections</h3>", unsafe_allow_html=True)
+    st.markdown("### Weighted Model with Point Projections")
 
     data, fixtures = load_data()
     if not data or not fixtures:
@@ -166,7 +166,7 @@ def main():
 
     st.sidebar.divider()
     min_minutes = st.sidebar.slider(
-        "Min. Minutes Played", 0, 2000, 0, 
+        "Min. Minutes Played", 0, 2000, 250, 
         help="Set to 0 to analyze ALL players.",
         on_change=reset_page,
         key="min_mins"
@@ -327,7 +327,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
