@@ -2,281 +2,233 @@ import streamlit as st
 import requests
 import pandas as pd
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="FPL Schedule-Adjusted Model v8", page_icon="⚖️", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(page_title="FPL Pro Predictor 25/26", page_icon="⚽", layout="wide")
 
-# --- CSS ---
-st.markdown("""
-<style>
-    .stDataFrame { width: 100%; }
-    .stProgress > div > div > div > div { 
-        background-image: linear-gradient(to right, #a83232, #d19630, #37a849); 
-    }
-</style>
-""", unsafe_allow_html=True)
+# --- CONSTANTS ---
+API_BASE = "https://fantasy.premierleague.com/api"
 
-# --- 1. DATA LOADING ---
+# --- CACHED DATA LOADER ---
 @st.cache_data(ttl=600)
 def load_data():
-    base_url = "https://fantasy.premierleague.com/api/"
+    # 1. Fetch Bootstrap Static (Players, Teams, Events)
     try:
-        static = requests.get(base_url + "bootstrap-static/").json()
-        fixtures = requests.get(base_url + "fixtures/").json()
-        return static, fixtures
+        bootstrap = requests.get(f"{API_BASE}/bootstrap-static/").json()
     except:
+        st.error("API Error: Could not fetch static data.")
         return None, None
 
-def get_team_leakiness(static_data):
-    """Calculates Team xGC per 90."""
-    team_xgc = {t['id']: [] for t in static_data['teams']}
-    for p in static_data['elements']:
-        if p['element_type'] in [1, 2] and p['minutes'] > 450:
-            try:
-                xgc = float(p.get('expected_goals_conceded_per_90', 0))
-                team_xgc[p['team']].append(xgc)
-            except: continue
+    # 2. Determine Next Gameweek
+    next_gw = None
+    for event in bootstrap['events']:
+        if event['is_next']:
+            next_gw = event['id']
+            break
     
-    team_strength = {}
-    for t_id, values in team_xgc.items():
-        team_strength[t_id] = sum(values) / len(values) if values else 1.5
-    return team_strength
+    if not next_gw:
+        st.warning("Season finished or no next gameweek found.")
+        return bootstrap, {}
 
-def get_schedule_analytics(static_data, fixture_data):
-    """
-    Analyzes BOTH Past and Future schedules.
-    Returns:
-    1. future_schedule: {team_id: [list of next 10]}
-    2. past_difficulty: {team_id: average_difficulty_of_played_games}
-    """
-    teams = {t['id']: t['short_name'] for t in static_data['teams']}
-    next_gw = next((e['id'] for e in static_data['events'] if e['is_next']), 1)
-    
-    future_schedule = {t_id: [] for t_id in teams}
-    past_difficulty_sum = {t_id: [] for t_id in teams}
-    
-    for f in fixture_data:
-        h, a = f['team_h'], f['team_a']
-        h_diff, a_diff = f['team_h_difficulty'], f['team_a_difficulty']
-
-        # PAST GAMES (Finished)
-        if f['finished'] == True:
-            past_difficulty_sum[h].append(h_diff)
-            past_difficulty_sum[a].append(a_diff)
-            
-        # FUTURE GAMES (Next 10)
-        if f['event'] and f['event'] >= next_gw:
-            if len(future_schedule[h]) < 10: future_schedule[h].append({"opp": teams[a], "diff": h_diff})
-            if len(future_schedule[a]) < 10: future_schedule[a].append({"opp": teams[h], "diff": a_diff})
-            
-    # Calculate Average Past Difficulty
-    past_avg = {}
-    for t_id, diffs in past_difficulty_sum.items():
-        past_avg[t_id] = sum(diffs) / len(diffs) if diffs else 3.0
-        
-    return future_schedule, past_avg
-
-# --- 2. SCORING ENGINES (ADJUSTED FOR PAST DIFFICULTY) ---
-
-def calc_attacker_score(p, future_map, past_avg_map, w_ppm, w_xgi, w_form, w_fix):
+    # 3. Fetch Fixtures for Next Gameweek
     try:
-        # 1. Base Stats
-        ppm = float(p['points_per_game'])
-        xgi = float(p.get('expected_goal_involvements', 0))
-        form = float(p['form'])
-        
-        # 2. Schedule Analytics
-        my_future = future_map.get(p['team'], [])
-        past_diff = past_avg_map.get(p['team'], 3.0)
-        
-        if not my_future: return 0, "", 0, 0
-        future_avg_diff = sum(m['diff'] for m in my_future) / len(my_future)
-        
-        # 3. THE ADJUSTMENT LOGIC (Crucial Step)
-        # If past schedule was Hard (>3.0), we BOOST the historical stats.
-        # If past schedule was Easy (<3.0), we DAMPEN the historical stats.
-        # We use a gentler multiplier: (Past / 3.0)
-        hardship_multiplier = past_diff / 3.0
-        
-        adj_ppm = ppm * hardship_multiplier
-        adj_xgi = xgi * hardship_multiplier
-        adj_form = form * hardship_multiplier
-        
-        # 4. Scoring (Using Adjusted Stats)
-        s_ppm = adj_ppm * 2.0          
-        s_xgi = adj_xgi * 0.8          
-        s_form = adj_form * 1.0        
-        
-        # Fixture score is forward-looking, so it uses future difficulty
-        s_fix = (5.0 - future_avg_diff) * 3.0 
-        
-        raw_score = (s_ppm * w_ppm) + (s_xgi * w_xgi) + (s_form * w_form) + (s_fix * w_fix)
-        
-        sched_str = ", ".join([f"{m['opp']}({m['diff']})" for m in my_future])
-        return raw_score, sched_str, future_avg_diff, past_diff
-    except: return 0, "", 0, 0
+        fixtures = requests.get(f"{API_BASE}/fixtures/?event={next_gw}").json()
+    except:
+        st.error("API Error: Could not fetch fixtures.")
+        return bootstrap, {}
 
-def calc_defender_score(p, future_map, past_avg_map, leakiness_map, w_ppm, w_cs, w_fix, w_att):
-    try:
-        ppm = float(p['points_per_game'])
-        xgi = float(p.get('expected_goal_involvements', 0))
-        team_xgc = leakiness_map.get(p['team'], 1.5)
-        
-        my_future = future_map.get(p['team'], [])
-        past_diff = past_avg_map.get(p['team'], 3.0)
-        
-        if not my_future: return 0, "", 0, 0
-        future_avg_diff = sum(m['diff'] for m in my_future) / len(my_future)
-        
-        # Adjustment Logic
-        hardship_multiplier = past_diff / 3.0
-        
-        adj_ppm = ppm * hardship_multiplier
-        adj_xgi = xgi * hardship_multiplier # Attacking return usually independent of team, but harder vs hard teams
-        
-        # Scoring
-        s_ppm = adj_ppm * 2.0 
-        s_cs = (3.0 - team_xgc) * 5.5 # Equivalence factor
-        s_fix = (5.0 - future_avg_diff) * 3.5 
-        s_att = adj_xgi * 2.5 
-        
-        raw_score = (s_ppm * w_ppm) + (s_cs * w_cs) + (s_fix * w_fix) + (s_att * w_att)
-        
-        sched_str = ", ".join([f"{m['opp']}({m['diff']})" for m in my_future])
-        return raw_score, sched_str, future_avg_diff, past_diff
-    except: return 0, "", 0, 0
-
-# --- 3. MAIN APP ---
-def main():
-    st.title("⚖️ FPL Schedule-Adjusted Model v8")
-    st.markdown("""
-    **Logic:** If a player has high stats despite a **Hard Past Schedule**, their ROI Index is boosted.
-    *(Hardship Multiplier = Past Avg Difficulty / 3.0)*
-    """)
-    
-    with st.spinner("Analyzing Past & Future Schedules..."):
-        static, fixtures = load_data()
-        if not static: st.error("API Error"); return
-        
-        # Get both schedules
-        future_map, past_map = get_schedule_analytics(static, fixtures)
-        leakiness = get_team_leakiness(static)
-        teams = {t['id']: t['short_name'] for t in static['teams']}
-
-    # --- SIDEBAR ---
-    st.sidebar.header("⚙️ Model Calibration")
-    with st.sidebar.expander("Adjust Weights", expanded=False):
-        st.write("**Attackers**")
-        aw_ppm = st.slider("PPM", 0.1, 1.0, 0.9)
-        aw_xgi = st.slider("xGI", 0.1, 1.0, 0.7)
-        aw_fix = st.slider("Future Fixtures", 0.1, 1.0, 0.4)
-        aw_form = st.slider("Form", 0.1, 1.0, 0.3)
-        st.write("**Defenders**")
-        dw_ppm = st.slider("PPM ", 0.1, 1.0, 0.8)
-        dw_cs = st.slider("Clean Sheet", 0.1, 1.0, 0.7)
-        dw_fix = st.slider("Future Fixtures ", 0.1, 1.0, 0.4)
-    
-    min_mins = st.sidebar.number_input("Min Minutes", 0, 3000, 500)
-
-    # --- CALCULATION LOOP ---
-    all_players = []
-    
-    for p in static['elements']:
-        if p['minutes'] < min_mins: continue
-        
-        price = p['now_cost'] / 10.0
-        pos = p['element_type']
-        raw_score = 0
-        sched = ""
-        past_diff = 3.0
-        category = ""
-        
-        if pos in [3, 4]: # ATTACK
-            raw_score, sched, f_diff, past_diff = calc_attacker_score(
-                p, future_map, past_map, aw_ppm, aw_xgi, aw_form, aw_fix
-            )
-            category = "Attack"
-        elif pos in [1, 2]: # DEFENSE
-            raw_score, sched, f_diff, past_diff = calc_defender_score(
-                p, future_map, past_map, leakiness, dw_ppm, dw_cs, dw_fix, 0.3
-            )
-            category = "Defense"
-            
-        if raw_score > 0:
-            all_players.append({
-                "Name": p['web_name'],
-                "Team": teams[p['team']],
-                "Pos": {1:"GKP", 2:"DEF", 3:"MID", 4:"FWD"}[pos],
-                "Category": category,
-                "Price": price,
-                "PPM": float(p['points_per_game']),
-                "Past Diff": past_diff,  # NEW METRIC
-                "Raw Score": raw_score,
-                "Schedule": sched
-            })
-
-    df_all = pd.DataFrame(all_players)
-
-    # NORMALIZE TO 1-10 SCALE
-    if not df_all.empty:
-        max_raw = df_all['Raw Score'].max()
-        df_all['ROI Index'] = 1.0 + ((df_all['Raw Score'] / max_raw) * 9.0)
-    else: return
-
-    # --- DISPLAY ---
-    tab_exp, tab_att, tab_def, tab_val = st.tabs([
-        "💥 Explosion Potential (Adjusted)", 
-        "⚔️ Attackers", "🛡️ Defenders", "💎 Value Engine"
-    ])
-
-    # Helper function for display config
-    def get_config():
-        return {
-            "ROI Index": st.column_config.ProgressColumn("Exp. ROI Index (1-10)", format="%.1f", min_value=1, max_value=10),
-            "Past Diff": st.column_config.NumberColumn(
-                "Past Schedule", 
-                format="%.2f", 
-                help="Avg difficulty of games played so far. Higher (>3.0) means they survived a hard run and Stats are boosted."
-            ),
-            "PPM": st.column_config.NumberColumn("PPM", format="%.1f"),
-            "Price": st.column_config.NumberColumn("£", format="£%.1f"),
-            "Schedule": st.column_config.TextColumn("Next 10 Fixtures", width="large")
+    # 4. Map Team ID to Next Opponent ID & Difficulty
+    # Structure: { team_id: { 'opponent': opp_id, 'difficulty': diff_rating, 'is_home': bool } }
+    fixture_map = {}
+    for f in fixtures:
+        # Home Team's data
+        fixture_map[f['team_h']] = {
+            'opponent': f['team_a'],
+            'difficulty': f['team_h_difficulty'],
+            'is_home': True
+        }
+        # Away Team's data
+        fixture_map[f['team_a']] = {
+            'opponent': f['team_h'],
+            'difficulty': f['team_a_difficulty'],
+            'is_home': False
         }
 
-    with tab_exp:
-        st.markdown("### 💥 Schedule-Adjusted Leaderboard")
-        st.info("Players with **High 'Past Schedule' (>3.0)** scores have their ROI Index boosted because they performed well against tough teams.")
-        
-        df_show = df_all.sort_values("ROI Index", ascending=False).head(50)
-        st.dataframe(df_show, hide_index=True, use_container_width=True, column_config=get_config())
+    return bootstrap, fixture_map
 
-    with tab_att:
-        df_show = df_all[df_all['Category']=="Attack"].sort_values("ROI Index", ascending=False).head(50)
-        st.dataframe(df_show, hide_index=True, use_container_width=True, column_config=get_config())
+# --- TEAM STATS CALCULATOR ---
+def calculate_team_stats(data):
+    """
+    Returns two dictionaries:
+    1. defensive_weakness: How likely a team is to concede (based on xGC).
+    2. defensive_strength: How good a team is at defending (inverse of weakness).
+    """
+    team_xgc = {t['id']: 0.0 for t in data['teams']}
+    
+    # Sum xGC for Defenders (Type 2) and GKs (Type 1) to judge defensive leakiness
+    for p in data['elements']:
+        if p['element_type'] in [1, 2]:
+            try:
+                xgc = float(p.get('expected_goals_conceded', 0))
+                team_xgc[p['team']] += xgc
+            except:
+                continue
+                
+    # Normalize to 0-10 Scale
+    # High Score = Very Weak Defense (Good to attack against)
+    # Low Score = Strong Defense
+    max_val = max(team_xgc.values()) if team_xgc else 1
+    weakness_map = {k: (v / max_val) * 10.0 for k, v in team_xgc.items()}
+    
+    # Create Strength Map (Inverse of Weakness) for Clean Sheet prediction
+    strength_map = {k: 10.0 - v for k, v in weakness_map.items()}
 
-    with tab_def:
-        df_show = df_all[df_all['Category']=="Defense"].sort_values("ROI Index", ascending=False).head(50)
-        st.dataframe(df_show, hide_index=True, use_container_width=True, column_config=get_config())
+    return weakness_map, strength_map
+
+# --- MAIN APP ---
+def main():
+    st.title("🧠 FPL AI Predictor (Enhanced Model)")
+    st.markdown("""
+    **Logic:** 
+    1. **Form & Threat:** Uses `xGI` (Expected Goal Involvement) and recent `Form`.
+    2. **Fixture Difficulty:** Analyzes the **actual upcoming opponent**.
+    3. **Opponent Leakiness:** Checks how many Expected Goals (xGC) the opponent concedes.
+    """)
+
+    data, fixture_map = load_data()
+    if not data:
+        return
+
+    # Mappings
+    team_names = {t['id']: t['name'] for t in data['teams']}
+    opp_weakness_map, team_strength_map = calculate_team_stats(data)
+
+    # --- SIDEBAR ---
+    st.sidebar.header("⚙️ Prediction Weights")
+    st.sidebar.info("Adjusted to equal weights by default.")
+    
+    # Defaulting to equal weights (0.5 each)
+    w_form = st.sidebar.slider("Player Stats (Form/xGI)", 0.1, 1.0, 0.5)
+    w_fix = st.sidebar.slider("Fixture Favorability", 0.1, 1.0, 0.5)
+    
+    st.sidebar.divider()
+    st.sidebar.header("🔎 Player Filters")
+    
+    # Expanded positions to include Defenders
+    pos_map = {"Goalkeeper": 1, "Defender": 2, "Midfielder": 3, "Forward": 4}
+    position_filter = st.sidebar.multiselect(
+        "Positions", 
+        options=list(pos_map.keys()), 
+        default=["Midfielder", "Forward", "Defender"]
+    )
+    
+    min_price = st.sidebar.number_input("Min Price (£m)", 3.5, 15.0, 4.0)
+    max_price = st.sidebar.number_input("Max Price (£m)", 4.0, 15.0, 15.0)
+
+    # --- ANALYSIS ---
+    if st.button("Run Prediction Model", type="primary"):
+        if not position_filter:
+            st.error("Please select at least one position.")
+            return
+
+        valid_types = [pos_map[p] for p in position_filter]
+        candidates = []
         
-    with tab_val:
-        c1, c2 = st.columns(2)
-        w_roi = c1.slider("Importance: ROI Index", 0, 100, 70)
-        w_cost = c2.slider("Importance: Low Price", 0, 100, 30)
+        with st.spinner("Analyzing matchups against next opponents..."):
+            for p in data['elements']:
+                # 1. Basic Filters
+                if p['status'] != 'a' or p['minutes'] < 90: # Must have played some minutes
+                    continue
+                
+                price = p['now_cost'] / 10.0
+                if not (min_price <= price <= max_price):
+                    continue
+                
+                if p['element_type'] not in valid_types:
+                    continue
+
+                # 2. Get Upcoming Matchup
+                tid = p['team']
+                if tid not in fixture_map:
+                    continue # Team has a blank gameweek
+                
+                match_info = fixture_map[tid]
+                opp_id = match_info['opponent']
+                is_home = match_info['is_home']
+                
+                # 3. Calculate Metrics
+                try:
+                    xgi = float(p.get('expected_goal_involvements_per_90', 0))
+                    form = float(p['form'])
+                except:
+                    continue
+                
+                # SKIP if stats are negligible (Optimization)
+                if xgi < 0.1 and form < 2.0:
+                    continue
+
+                # --- SCORING ALGORITHM ---
+                
+                # A. PLAYER STATS SCORE (0-10)
+                # Normalizing xGI (Top players represent ~1.0 xGI/90) -> Scale to 10
+                stat_score = (xgi * 8) + (form / 2) 
+                
+                # B. FIXTURE SCORE (0-10)
+                # How weak is the opponent?
+                opp_leakiness = opp_weakness_map.get(opp_id, 5.0)
+                
+                # Home advantage bonus (+1.5)
+                home_boost = 1.5 if is_home else 0
+                
+                fixture_score = opp_leakiness + home_boost
+
+                # C. DEFENDER SPECIFIC LOGIC
+                # If Defender/GK, add Clean Sheet Potential (Their own team strength vs Opponent)
+                if p['element_type'] in [1, 2]:
+                    my_team_def = team_strength_map.get(tid, 5.0)
+                    # Defenders rely 50% on CS and 50% on Attacking Return in this model
+                    # We average the 'stat_score' (attack) with 'my_team_def'
+                    stat_score = (stat_score * 0.6) + (my_team_def * 0.4)
+
+                # D. FINAL WEIGHTED SCORE
+                total_score = (stat_score * w_form) + (fixture_score * w_fix)
+                
+                candidates.append({
+                    "Player": p['web_name'],
+                    "Team": team_names[tid],
+                    "Pos": [k for k, v in pos_map.items() if v == p['element_type']][0][:3].upper(),
+                    "Next Opp": team_names[opp_id] + (" (H)" if is_home else " (A)"),
+                    "Price": price,
+                    "Form": form,
+                    "xGI/90": xgi,
+                    "Prediction": total_score
+                })
+
+        # Display Results
+        df = pd.DataFrame(candidates)
         
-        df_val = df_all.copy()
-        df_val['n_roi'] = (df_val['ROI Index'] - 1) / 9
-        min_p, max_p = df_val['Price'].min(), df_val['Price'].max()
-        df_val['n_price'] = 1 - ((df_val['Price'] - min_p) / (max_p - min_p))
-        df_val['Val Score'] = (df_val['n_roi'] * w_roi) + (df_val['n_price'] * w_cost)
-        
-        df_val = df_val.sort_values("Val Score", ascending=False).head(50)
-        
-        st.dataframe(df_val, hide_index=True, use_container_width=True, column_config={
-            "Val Score": st.column_config.ProgressColumn("Algorithm Score", format="%.0f"),
-            "ROI Index": st.column_config.NumberColumn("ROI Index", format="%.1f"),
-            "Past Diff": st.column_config.NumberColumn("Past Diff", format="%.2f"),
-            "Price": st.column_config.NumberColumn("£", format="£%.1f"),
-            "Schedule": st.column_config.TextColumn("Next 10", width="large")
-        })
+        if not df.empty:
+            df = df.sort_values(by="Prediction", ascending=False).head(25)
+            
+            st.success(f"Analysis Complete! Found {len(candidates)} eligible players.")
+            
+            st.dataframe(
+                df,
+                column_config={
+                    "Prediction": st.column_config.ProgressColumn(
+                        "Predicted Points Potential",
+                        help="Weighted score based on Form, xGI, and Opponent Difficulty",
+                        format="%.2f",
+                        min_value=0,
+                        max_value=max(df["Prediction"]),
+                    ),
+                    "Price": st.column_config.NumberColumn("Price", format="£%.1f"),
+                    "xGI/90": st.column_config.NumberColumn("xGI/90", format="%.2f"),
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.warning("No players found. Try lowering the minimum price or checking filters.")
 
 if __name__ == "__main__":
     main()
