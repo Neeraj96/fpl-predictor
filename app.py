@@ -14,55 +14,36 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE ---
-if 'page' not in st.session_state:
-    st.session_state.page = 0
+if 'page' not in st.session_state: st.session_state.page = 0
 
-def reset_page():
-    st.session_state.page = 0
+def reset_page(): st.session_state.page = 0
 
-# --- CONSTANTS ---
 API_BASE = "https://fantasy.premierleague.com/api"
 
-# --- DATA LOADING ---
 @st.cache_data(ttl=1800)
 def load_data():
     try:
         bootstrap = requests.get(f"{API_BASE}/bootstrap-static/").json()
+        fixtures = requests.get(f"{API_BASE}/fixtures/").json()
+        return bootstrap, fixtures
     except:
-        st.error("API Error: Could not fetch static data.")
+        st.error("API Error")
         return None, None
 
-    try:
-        fixtures = requests.get(f"{API_BASE}/fixtures/").json()
-    except:
-        st.error("API Error: Could not fetch fixtures.")
-        return bootstrap, None
-
-    return bootstrap, fixtures
-
-# --- LOGIC ENGINE ---
 def process_fixtures(fixtures, teams_data):
     team_map = {t['id']: t['short_name'] for t in teams_data}
     team_sched = {t['id']: {'past': [], 'future': []} for t in teams_data}
 
     for f in fixtures:
         if not f['kickoff_time']: continue
-
-        h = f['team_h']
-        a = f['team_a']
-        h_diff = f['team_h_difficulty']
-        a_diff = f['team_a_difficulty']
-
-        # Favourability: 6 - Difficulty + 0.5 for Home
+        h, a = f['team_h'], f['team_a']
+        h_diff, a_diff = f['team_h_difficulty'], f['team_a_difficulty']
+        
         h_fav = (6 - h_diff) + 0.5
         a_fav = (6 - a_diff)
-
-        h_display = f"{team_map[a]}(H)"
-        a_display = f"{team_map[h]}(A)"
-
-        h_obj = {'score': h_fav, 'display': h_display}
-        a_obj = {'score': a_fav, 'display': a_display}
+        
+        h_obj = {'score': h_fav, 'display': f"{team_map[a]}(H)"}
+        a_obj = {'score': a_fav, 'display': f"{team_map[h]}(A)"}
 
         if f['finished']:
             team_sched[h]['past'].append(h_obj)
@@ -70,32 +51,26 @@ def process_fixtures(fixtures, teams_data):
         else:
             team_sched[h]['future'].append(h_obj)
             team_sched[a]['future'].append(a_obj)
-
     return team_sched
 
 def get_aggregated_data(schedule_list, limit=None):
-    if not schedule_list:
-        return 3.0, "-"
+    if not schedule_list: return 3.0, "-"
     subset = schedule_list[:limit] if limit else schedule_list
     avg_score = sum(item['score'] for item in subset) / len(subset)
-    display_str = ", ".join([item['display'] for item in subset])
-    return avg_score, display_str
+    return avg_score, ", ".join([item['display'] for item in subset])
 
 def min_max_scale(series):
     if series.empty: return series
-    min_v = series.min()
-    max_v = series.max()
-    if max_v == min_v: return pd.Series([5.0] * len(series), index=series.index)
+    min_v, max_v = series.min(), series.max()
+    if max_v == min_v: return pd.Series([5.0]*len(series), index=series.index)
     return ((series - min_v) / (max_v - min_v)) * 10
 
-# --- MAIN APP ---
 def main():
-    st.title("🧠 FPL Pro Predictor: Full Market Analysis")
-    st.markdown("### Complete dataset analysis with Transparency Mode.")
+    st.title("🧠 FPL Pro Predictor: Diagnostic Mode")
+    st.markdown("### Comparison of Raw Metrics vs Scaled ROI")
 
     data, fixtures = load_data()
-    if not data or not fixtures:
-        return
+    if not data or not fixtures: return
 
     teams = data['teams']
     team_names = {t['id']: t['name'] for t in teams}
@@ -106,100 +81,69 @@ def main():
     team_def_strength = {k: 10 - ((v/max_str)*10) + 5 for k,v in team_conceded.items()}
 
     # --- SIDEBAR ---
-    st.sidebar.header("🔮 Prediction Horizon")
-    horizon_option = st.sidebar.selectbox(
-        "Predict for upcoming:",
-        options=[1, 5, 10],
-        format_func=lambda x: f"Next {x} Fixture{'s' if x > 1 else ''}",
-        on_change=reset_page
-    )
-
-    st.sidebar.divider()
-    st.sidebar.header("⚖️ Global Model Weights")
+    st.sidebar.header("🔮 Settings")
+    horizon_option = st.sidebar.selectbox("Fixtures Lookahead", [1, 5, 10], on_change=reset_page)
+    w_budget = st.sidebar.slider("Price Weight (Value)", 0.0, 1.0, 0.5, on_change=reset_page)
     
-    w_budget = st.sidebar.slider("Price Importance", 0.0, 1.0, 0.5, on_change=reset_page)
-    
-    st.sidebar.markdown("**Attribute Weights**")
-    with st.sidebar.expander("GK & Defender", expanded=False):
-        w_cs = st.slider("Clean Sheet Potential", 0.1, 1.0, 0.5, key="w_cs", on_change=reset_page)
-        w_ppm_def = st.slider("Points Per Match (DEF)", 0.1, 1.0, 0.5, key="w_ppm_d", on_change=reset_page)
-        w_fix_def = st.slider("Fixture Favourability (DEF)", 0.1, 1.0, 0.5, key="w_fix_d", on_change=reset_page)
-
-    with st.sidebar.expander("Mid & Attacker", expanded=False):
-        w_xgi = st.slider("Total xGI Threat", 0.1, 1.0, 0.5, key="w_xgi", on_change=reset_page)
-        w_ppm_att = st.slider("Points Per Match (ATT)", 0.1, 1.0, 0.5, key="w_ppm_a", on_change=reset_page)
-        w_fix_att = st.slider("Fixture Favourability (ATT)", 0.1, 1.0, 0.5, key="w_fix_a", on_change=reset_page)
-
     st.sidebar.divider()
-    min_minutes = st.sidebar.slider("Min. Minutes Played", 0, 2000, 0, on_change=reset_page)
+    st.sidebar.info("Forcing Equal Weights (0.5) for attributes to isolate variables.")
+    
+    min_minutes = st.sidebar.slider("Min Minutes", 0, 2000, 0, on_change=reset_page)
 
-    # --- ANALYSIS ---
-    def run_analysis(player_type_ids, is_defense):
+    def run_analysis(p_ids, is_defense):
         candidates = []
-        
+        w_stats = 0.5
+        w_ppm = 0.5
+        w_fix = 0.5
+
         for p in data['elements']:
-            if p['element_type'] not in player_type_ids: continue
+            if p['element_type'] not in p_ids: continue
             if p['minutes'] < min_minutes: continue
 
             tid = p['team']
-            
-            # 1. Fixture Metrics
             past_score, _ = get_aggregated_data(team_schedule[tid]['past'])
             future_score, future_display = get_aggregated_data(team_schedule[tid]['future'], limit=horizon_option)
 
-            # 2. Base Metrics
             try:
                 ppm = float(p['points_per_game'])
                 price = p['now_cost'] / 10.0
                 if price <= 0: price = 4.0
                 
                 if is_defense:
-                    cs_potential = (float(p['clean_sheets_per_90']) * 10) + (team_def_strength[tid] / 2)
-                    base_score = (cs_potential * w_cs) + (ppm * w_ppm_def) + (future_score * w_fix_def)
+                    cs_per_90 = float(p['clean_sheets_per_90'])
+                    cs_potential = (cs_per_90 * 10) + (team_def_strength[tid] / 2)
+                    base_score = (cs_potential * w_stats) + (ppm * w_ppm) + (future_score * w_fix)
+                    stat_display = cs_per_90
                 else:
-                    xgi = float(p.get('expected_goal_involvements_per_90', 0)) * 10
-                    base_score = (xgi * w_xgi) + (ppm * w_ppm_att) + (future_score * w_fix_att)
+                    xgi = float(p.get('expected_goal_involvements_per_90', 0))
+                    # Note: xGI is usually 0.0 to 1.2 range. We multiply by 10 to match PPM scale (0-10)
+                    base_score = ((xgi * 10) * w_stats) + (ppm * w_ppm) + (future_score * w_fix)
+                    stat_display = xgi
 
-                # 3. Resistance Adjustment
-                # This is the divisor!
                 resistance_factor = max(2.0, min(past_score, 5.0))
-                
                 raw_perf_metric = base_score / resistance_factor
                 
-                status_icon = "✅" if p['status'] == 'a' else ("⚠️" if p['status'] == 'd' else "❌")
-
                 candidates.append({
-                    "Name": f"{status_icon} {p['web_name']}",
+                    "Name": p['web_name'],
                     "Team": team_names[tid],
                     "Price": price,
-                    "Upcoming Fixtures": future_display,
-                    "PPM": ppm,
-                    "Future Fix": round(future_score, 2),
-                    "Resistance": round(resistance_factor, 2), # NEW COLUMN
-                    "Raw_Metric": raw_perf_metric,
+                    "xGI/CS": stat_display, # New Column
+                    "Resistance": resistance_factor,
+                    "Raw Score": raw_perf_metric, # New Column
+                    "Upcoming": future_display
                 })
+            except: continue
 
-            except Exception:
-                continue
-
-        # --- DATAFRAME ---
         df = pd.DataFrame(candidates)
         if df.empty: return df
 
-        # Normalize
-        df['Norm_Perf'] = min_max_scale(df['Raw_Metric'])
-        df['Value_Metric'] = df['Raw_Metric'] / df['Price']
+        df['Norm_Perf'] = min_max_scale(df['Raw Score'])
+        df['Value_Metric'] = df['Raw Score'] / df['Price']
         df['Norm_Value'] = min_max_scale(df['Value_Metric'])
-        
-        # ROI
         df['ROI Index'] = (df['Norm_Perf'] * (1 - w_budget)) + (df['Norm_Value'] * w_budget)
         
-        df = df.sort_values(by="ROI Index", ascending=False)
-        
-        cols = ["ROI Index", "Name", "Team", "Price", "Upcoming Fixtures", "PPM", "Future Fix", "Resistance"]
-        return df[cols]
+        return df.sort_values(by="ROI Index", ascending=False)
 
-    # --- RENDER TABS ---
     def render_tab(p_ids, is_def):
         df = run_analysis(p_ids, is_def)
         if df.empty:
@@ -210,49 +154,38 @@ def main():
         items_per_page = 50
         total_items = len(df)
         total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
-        
         if st.session_state.page >= total_pages: st.session_state.page = total_pages - 1
-        if st.session_state.page < 0: st.session_state.page = 0
-            
-        start_idx = st.session_state.page * items_per_page
-        end_idx = start_idx + items_per_page
-        df_display = df.iloc[start_idx:end_idx]
         
-        st.caption(f"Showing **{start_idx + 1}-{min(end_idx, total_items)}** of **{total_items}** players")
+        start, end = st.session_state.page * items_per_page, (st.session_state.page + 1) * items_per_page
+        
+        col_label = "CS/90" if is_def else "xGI/90"
         
         st.dataframe(
-            df_display, 
-            hide_index=True, 
+            df.iloc[start:end],
+            hide_index=True,
             column_config={
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
                 "Price": st.column_config.NumberColumn("£", format="£%.1f"),
-                "Upcoming Fixtures": st.column_config.TextColumn("Opponents", width="medium"),
-                "PPM": st.column_config.NumberColumn("Pts/G", format="%.1f"),
-                "Resistance": st.column_config.NumberColumn(
-                    "Resistance (Divisor)", 
-                    help="Penalty for Easy Past Games. Higher (max 5.0) = Score is divided more heavily. Lower (min 2.0) = Score is kept intact.",
-                    format="%.2f"
-                ),
+                "xGI/CS": st.column_config.NumberColumn(col_label, format="%.2f", help="Underlying stat (Expected Goals or Clean Sheets)"),
+                "Raw Score": st.column_config.NumberColumn("Raw Score", format="%.2f", help="The unscaled score before comparing to other players"),
+                "Resistance": st.column_config.NumberColumn("Resist.", format="%.2f"),
             },
             use_container_width=True
         )
         
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c1:
-            if st.button("⬅️ Previous 50", disabled=(st.session_state.page == 0), key=f"prev_{p_ids}"):
-                st.session_state.page -= 1
-                st.rerun()
-        with c3:
-            if st.button("Next 50 ➡️", disabled=(st.session_state.page == total_pages - 1), key=f"next_{p_ids}"):
-                st.session_state.page += 1
-                st.rerun()
+        c1, _, c3 = st.columns([1, 2, 1])
+        if c1.button("Prev", key=f"p{p_ids}") and st.session_state.page > 0: 
+            st.session_state.page -= 1
+            st.rerun()
+        if c3.button("Next", key=f"n{p_ids}") and st.session_state.page < total_pages - 1: 
+            st.session_state.page += 1
+            st.rerun()
 
-    tab_gk, tab_def, tab_mid, tab_fwd = st.tabs(["🧤 GK", "🛡️ DEF", "⚔️ MID", "⚽ FWD"])
-
-    with tab_gk: render_tab([1], True)
-    with tab_def: render_tab([2], True)
-    with tab_mid: render_tab([3], False)
-    with tab_fwd: render_tab([4], False)
+    t1, t2, t3, t4 = st.tabs(["GK", "DEF", "MID", "FWD"])
+    with t1: render_tab([1], True)
+    with t2: render_tab([2], True)
+    with t3: render_tab([3], False)
+    with t4: render_tab([4], False)
 
 if __name__ == "__main__":
     main()
