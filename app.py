@@ -166,7 +166,7 @@ def main():
 
     st.sidebar.divider()
     min_minutes = st.sidebar.slider(
-        "Min. Minutes Played", 0, 2000, 250, 
+        "Min. Minutes Played", 250, 2000, 0, 
         help="Set to 0 to analyze ALL players.",
         on_change=reset_page,
         key="min_mins"
@@ -327,5 +327,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
