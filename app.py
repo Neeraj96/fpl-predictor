@@ -92,7 +92,7 @@ def min_max_scale(series):
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("### Customizable Weighted Model")
+    st.markdown("### Weighted Model with Point Projections")
 
     data, fixtures = load_data()
     if not data or not fixtures:
@@ -167,23 +167,32 @@ def main():
                 if price <= 0: price = 4.0
                 
                 if is_defense:
-                    # For GKs, we show CS/90. For Defenders, we might technically prefer xGI, 
-                    # but for now keeping consistent per block.
-                    # Actually, let's store the primary stat used for display.
                     stat_val = float(p['clean_sheets_per_90'])
-                    stat_label = stat_val # CS per 90
+                    stat_label = stat_val 
                     
                     cs_potential = (stat_val * 10) + (team_def_strength[tid] / 2)
                     base_score = (cs_potential * w_cs) + (ppm * w_ppm_def) + (future_score * w_fix_def)
+                    
+                    # Proj Pts Logic (Defenders rely on CS potential + PPM)
+                    base_strength = (ppm * 0.7) + (stat_val * 6 * 0.3)
+
                 else:
-                    # xGI per 90
                     stat_val = float(p.get('expected_goal_involvements_per_90', 0))
                     stat_label = stat_val
                     
-                    # Note: We multiply xGI by 10 to match the scale of PPM (0-10)
                     base_score = ((stat_val * 10) * w_xgi) + (ppm * w_ppm_att) + (future_score * w_fix_att)
+                    
+                    # Proj Pts Logic (Attackers rely on PPM + xGI upside)
+                    base_strength = (ppm * 0.7) + (stat_val * 8 * 0.3)
 
-                # 3. Resistance Adjustment
+                # 3. PREDICTED POINTS CALCULATION
+                # Multiplier: Normalized around 3.5 (Avg difficulty)
+                # If Future Score is 5.0 (Easy), Multiplier = 1.42
+                # If Future Score is 2.0 (Hard), Multiplier = 0.57
+                fix_multiplier = future_score / 3.5
+                proj_points = base_strength * fix_multiplier
+
+                # 4. Resistance Adjustment (For ROI Index)
                 resistance_factor = max(2.0, min(past_score, 5.0))
                 raw_perf_metric = base_score / resistance_factor
                 
@@ -193,9 +202,10 @@ def main():
                     "Name": f"{status_icon} {p['web_name']}",
                     "Team": team_names[tid],
                     "Price": price,
-                    "Stat_Display": stat_label, # CS/90 or xGI/90
+                    "Stat_Display": stat_label,
                     "Upcoming Fixtures": future_display,
                     "PPM": ppm,
+                    "Exp. Pts": proj_points, # NEW FIELD
                     "Future Fix": round(future_score, 2),
                     "Past Fix": round(past_score, 2),
                     "Raw_Metric": raw_perf_metric,
@@ -215,12 +225,13 @@ def main():
         df['Value_Metric'] = df['Raw_Metric'] / df['Price']
         df['Norm_Value'] = min_max_scale(df['Value_Metric'])
         
-        # ROI Calculation using Weights
+        # ROI Calculation
         df['ROI Index'] = (df['Norm_Perf'] * (1 - w_budget)) + (df['Norm_Value'] * w_budget)
         
         df = df.sort_values(by="ROI Index", ascending=False)
         
-        cols = ["ROI Index", "Name", "Team", "Price", "Stat_Display", "Upcoming Fixtures", "PPM", "Future Fix", "Past Fix"]
+        # Added "Exp. Pts" to display columns
+        cols = ["ROI Index", "Name", "Team", "Exp. Pts", "Price", "Stat_Display", "Upcoming Fixtures", "PPM", "Future Fix", "Past Fix"]
         return df[cols]
 
     # --- DISPLAY ---
@@ -248,7 +259,6 @@ def main():
         
         st.caption(f"Showing **{start_idx + 1}-{min(end_idx, total_items)}** of **{total_items}** players")
         
-        # Dynamic Column Name for xGI/CS
         stat_col_name = "CS/90" if is_def else "xGI/90"
         
         st.dataframe(
@@ -256,6 +266,7 @@ def main():
             hide_index=True, 
             column_config={
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
+                "Exp. Pts": st.column_config.NumberColumn("Exp. Pts", format="%.1f", help="Projected points per match based on form & upcoming fixtures."),
                 "Price": st.column_config.NumberColumn("£", format="£%.1f"),
                 "Stat_Display": st.column_config.NumberColumn(stat_col_name, format="%.2f", help=f"{stat_col_name} stats from FPL API"),
                 "Upcoming Fixtures": st.column_config.TextColumn("Opponents", width="medium"),
@@ -266,7 +277,6 @@ def main():
             use_container_width=True
         )
         
-        # Buttons
         c1, c2, c3 = st.columns([1, 2, 1])
         with c1:
             if st.button("⬅️ Previous 50", disabled=(st.session_state.page == 0), key=f"prev_{p_ids}"):
@@ -280,10 +290,10 @@ def main():
     # --- RENDER TABS ---
     tab_gk, tab_def, tab_mid, tab_fwd = st.tabs(["🧤 GK", "🛡️ DEF", "⚔️ MID", "⚽ FWD"])
 
-    with tab_gk: render_tab([1], True) # Shows CS/90
-    with tab_def: render_tab([2], True) # Shows CS/90
-    with tab_mid: render_tab([3], False) # Shows xGI/90
-    with tab_fwd: render_tab([4], False) # Shows xGI/90
+    with tab_gk: render_tab([1], True)
+    with tab_def: render_tab([2], True)
+    with tab_mid: render_tab([3], False)
+    with tab_fwd: render_tab([4], False)
 
 if __name__ == "__main__":
     main()
