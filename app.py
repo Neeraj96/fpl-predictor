@@ -9,41 +9,24 @@ st.set_page_config(page_title="FPL Pro Predictor 25/26", page_icon="⚽", layout
 # --- CUSTOM CSS ---
 st.markdown("""
 <style>
-    /* Increase Tab Size and Font */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
-        height: 60px;
-        white-space: pre-wrap;
-        background-color: #f0f2f6;
-        border-radius: 8px 8px 0 0;
-        padding: 10px 20px;
-        font-size: 18px; /* Bigger Text */
-        font-weight: 700; /* Bold */
-        color: #4a4a4a;
+        height: 60px; white-space: pre-wrap; background-color: #f0f2f6;
+        border-radius: 8px 8px 0 0; padding: 10px 20px;
+        font-size: 18px; font-weight: 700; color: #4a4a4a;
     }
-    .stTabs [data-baseweb="tab"]:hover {
-        background-color: #e0e2e6;
-        color: #1f77b4;
-    }
+    .stTabs [data-baseweb="tab"]:hover { background-color: #e0e2e6; color: #1f77b4; }
     .stTabs [data-baseweb="tab"][aria-selected="true"] {
-        background-color: #ffffff;
-        border-top: 3px solid #00cc00;
-        color: #00cc00;
-        box-shadow: 0 -2px 5px rgba(0,0,0,0.05);
+        background-color: #ffffff; border-top: 3px solid #00cc00;
+        color: #00cc00; box-shadow: 0 -2px 5px rgba(0,0,0,0.05);
     }
-    /* Button Styling */
     .stButton button { width: 100%; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- SESSION STATE ---
-if 'page' not in st.session_state:
-    st.session_state.page = 0
-
-def reset_page():
-    st.session_state.page = 0
+if 'page' not in st.session_state: st.session_state.page = 0
+def reset_page(): st.session_state.page = 0
 
 # --- CONSTANTS ---
 API_BASE = "https://fantasy.premierleague.com/api"
@@ -56,77 +39,62 @@ def load_data():
     except:
         st.error("API Error: Could not fetch static data.")
         return None, None
-
     try:
         fixtures = requests.get(f"{API_BASE}/fixtures/").json()
     except:
         st.error("API Error: Could not fetch fixtures.")
         return bootstrap, None
-
     return bootstrap, fixtures
 
 # --- LOGIC ENGINE ---
 def process_fixtures(fixtures, teams_data):
     team_map = {t['id']: t['short_name'] for t in teams_data}
     team_sched = {t['id']: {'past': [], 'future': []} for t in teams_data}
-
     for f in fixtures:
         if not f['kickoff_time']: continue
-
-        h = f['team_h']
-        a = f['team_a']
-        h_diff = f['team_h_difficulty']
-        a_diff = f['team_a_difficulty']
-
-        # Favourability: 6 - Difficulty + 0.5 for Home
+        h, a = f['team_h'], f['team_a']
+        h_diff, a_diff = f['team_h_difficulty'], f['team_a_difficulty']
+        
+        # Favourability: 6 - Difficulty + 0.5 Home Bonus
         h_fav = (6 - h_diff) + 0.5
         a_fav = (6 - a_diff)
-
-        h_display = f"{team_map[a]}(H)"
-        a_display = f"{team_map[h]}(A)"
-
-        h_obj = {'score': h_fav, 'display': h_display}
-        a_obj = {'score': a_fav, 'display': a_display}
-
+        
+        h_obj = {'score': h_fav, 'display': f"{team_map[a]}(H)"}
+        a_obj = {'score': a_fav, 'display': f"{team_map[h]}(A)"}
+        
         if f['finished']:
             team_sched[h]['past'].append(h_obj)
             team_sched[a]['past'].append(a_obj)
         else:
             team_sched[h]['future'].append(h_obj)
             team_sched[a]['future'].append(a_obj)
-
     return team_sched
 
 def get_aggregated_data(schedule_list, limit=None):
-    if not schedule_list:
-        return 3.0, "-"
+    if not schedule_list: return 3.0, "-"
     subset = schedule_list[:limit] if limit else schedule_list
     avg_score = sum(item['score'] for item in subset) / len(subset)
     display_str = ", ".join([item['display'] for item in subset])
     return avg_score, display_str
 
 def min_max_scale(series):
-    """Scales a pandas series to 0-10 range"""
     if series.empty: return series
-    min_v = series.min()
-    max_v = series.max()
-    if max_v == min_v: return pd.Series([5.0] * len(series), index=series.index)
+    min_v, max_v = series.min(), series.max()
+    if max_v == min_v: return pd.Series([5.0]*len(series), index=series.index)
     return ((series - min_v) / (max_v - min_v)) * 10
 
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("### Weighted Model with Context-Aware Projections")
+    st.markdown("### Official Scoring Model (Goals/Assists/CS Weighting)")
 
     data, fixtures = load_data()
-    if not data or not fixtures:
-        return
+    if not data or not fixtures: return
 
     teams = data['teams']
     team_names = {t['id']: t['name'] for t in teams}
     team_schedule = process_fixtures(fixtures, teams)
     
-    # Team Defense Strength
     team_conceded = {t['id']: t['strength_defence_home'] + t['strength_defence_away'] for t in teams}
     max_str = max(team_conceded.values()) if team_conceded else 1
     team_def_strength = {k: 10 - ((v/max_str)*10) + 5 for k,v in team_conceded.items()}
@@ -134,23 +102,14 @@ def main():
     # --- SIDEBAR ---
     st.sidebar.header("🔮 Prediction Horizon")
     horizon_option = st.sidebar.selectbox(
-        "Predict for upcoming:",
-        options=[1, 5, 10],
-        format_func=lambda x: f"Next {x} Fixture{'s' if x > 1 else ''}",
-        on_change=reset_page
+        "Predict for upcoming:", [1, 5, 10], 
+        format_func=lambda x: f"Next {x} Fixture{'s' if x > 1 else ''}", on_change=reset_page
     )
 
     st.sidebar.divider()
     st.sidebar.header("⚖️ Model Weights")
     
-    # PRICE SENSITIVITY
-    w_budget = st.sidebar.slider(
-        "Price Importance (Value vs Raw Points)", 
-        0.0, 1.0, 0.5,
-        help="0.0 = Best Players Only. 1.0 = Best Value Only.",
-        on_change=reset_page,
-        key="price_weight"
-    )
+    w_budget = st.sidebar.slider("Price Importance", 0.0, 1.0, 0.5, key="price_weight", on_change=reset_page)
     
     st.sidebar.divider()
     st.sidebar.subheader("Position Settings")
@@ -185,100 +144,93 @@ def main():
         fwd_weights = {'xgi': w_xgi_fwd, 'ppm': w_ppm_fwd, 'fix': w_fix_fwd}
 
     st.sidebar.divider()
-    min_minutes = st.sidebar.slider(
-        "Min. Minutes Played", 0, 2000, 250, 
-        help="Set to 0 to analyze ALL players.",
-        on_change=reset_page,
-        key="min_mins"
-    )
+    min_minutes = st.sidebar.slider("Min. Minutes Played", 0, 2000, 250, key="min_mins", on_change=reset_page)
 
-    # --- ANALYSIS ---
+    # --- ANALYSIS ENGINE ---
     def run_analysis(player_type_ids, pos_category, weights):
         candidates = []
         
+        # Define FPL Point Values based on Position
+        if pos_category in ["GK", "DEF"]:
+            pts_goal, pts_cs, pts_assist = 6, 4, 3
+        elif pos_category == "MID":
+            pts_goal, pts_cs, pts_assist = 5, 1, 3
+        else: # FWD
+            pts_goal, pts_cs, pts_assist = 4, 0, 3
+
         for p in data['elements']:
             if p['element_type'] not in player_type_ids: continue
             if p['minutes'] < min_minutes: continue
-
             tid = p['team']
             
-            # 1. Fixture Metrics (Scores include Home/Away weighting)
+            # Fixtures
             past_score, _ = get_aggregated_data(team_schedule[tid]['past'])
             future_score, future_display = get_aggregated_data(team_schedule[tid]['future'], limit=horizon_option)
 
-            # 2. Base Metrics
             try:
                 ppm = float(p['points_per_game'])
                 price = p['now_cost'] / 10.0
-                if price <= 0: price = 4.0
+                price = 4.0 if price <= 0 else price
                 
-                # --- LOGIC BLOCK ---
+                # Stats Extraction
+                # We split xGI into Goals and Assists to apply correct multipliers
+                xG = float(p.get('expected_goals_per_90', 0))
+                xA = float(p.get('expected_assists_per_90', 0))
+                CS_rate = float(p.get('clean_sheets_per_90', 0))
+                saves = float(p.get('saves_per_90', 0))
+
+                # --- CORE CALCULATION ---
+                
+                # 1. Intrinsic 'Attack Value' (0-10 scale approximation)
+                # Calculating raw expected attack points per 90 based on rules
+                raw_attack_pts = (xG * pts_goal) + (xA * pts_assist)
+                attack_score = min(10, raw_attack_pts * 1.5) # Scale up for index
+
+                # 2. Intrinsic 'Defense Value' (0-10 scale approximation)
+                # Blend player CS history with Team Strength
+                team_factor = team_def_strength[tid] / 10.0 # 0.5 to 1.5 multiplier roughly
+                raw_def_pts = (CS_rate * pts_cs) * team_factor
+                if pos_category == "GK": raw_def_pts += (saves / 3) # 1pt per 3 saves
+                def_score = min(10, raw_def_pts * 2.0)
+
+                # 3. ROI Index Score Construction
+                # We mix the specific scores based on the USER SLIDERS
                 if pos_category == "GK":
-                    # GK Logic: Clean Sheet + Form + Fixture (No Attacking Threat)
-                    stat_val = float(p['clean_sheets_per_90'])
-                    stat_label = stat_val 
-                    
-                    # A. ROI SCORE (0-10 Index)
-                    cs_potential = (stat_val * 10) + (team_def_strength[tid] / 2)
-                    
-                    base_score = (cs_potential * weights['cs']) + \
-                                 (ppm * weights['ppm']) + \
-                                 (future_score * weights['fix'])
-                    
-                    # B. BASE ABILITY (Intrinsic Points Potential)
-                    base_strength = (ppm * 0.6) + (stat_val * 6 * 0.4)
-
+                    base_score = (def_score * weights['cs']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
                 elif pos_category == "DEF":
-                    # DEF Logic: Clean Sheet + xGI + Form + Fixture
-                    cs_val = float(p['clean_sheets_per_90'])
-                    xgi_val = float(p.get('expected_goal_involvements_per_90', 0))
-                    stat_label = cs_val 
-                    
-                    cs_potential = (cs_val * 10) + (team_def_strength[tid] / 2)
-                    
-                    base_score = (cs_potential * weights['cs']) + \
-                                 ((xgi_val * 10) * weights['xgi']) + \
-                                 (ppm * weights['ppm']) + \
-                                 (future_score * weights['fix'])
-                    
-                    # B. BASE ABILITY
-                    base_strength = (ppm * 0.5) + (cs_val * 5 * 0.3) + (xgi_val * 5 * 0.2)
+                    base_score = (def_score * weights['cs']) + (attack_score * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
+                else: # MID/FWD
+                    # Mids get modest CS points, so we add def_score slightly for Mids
+                    def_component = def_score if pos_category == "MID" else 0
+                    base_score = (attack_score * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix']) + (def_component * 0.1)
 
-                else:
-                    # MID/FWD Logic: xGI + Form + Fixture
-                    stat_val = float(p.get('expected_goal_involvements_per_90', 0)) # xGI
-                    stat_label = stat_val
-                    
-                    base_score = ((stat_val * 10) * weights['xgi']) + \
-                                 (ppm * weights['ppm']) + \
-                                 (future_score * weights['fix'])
-                    
-                    # B. BASE ABILITY
-                    base_strength = (ppm * 0.55) + (stat_val * 7 * 0.45)
+                # 4. PREDICTED POINTS (The "Exp. Pts" Display)
+                # This uses the literal FPL scoring rules + Form + Fixture Multiplier
+                
+                # Intrinsic Points per Match (The math model)
+                # Blend: 50% History (PPM) + 50% Underlying Stats (xG/xA/CS)
+                intrinsic_pts = (ppm * 0.5) + ((raw_attack_pts + raw_def_pts) * 0.5)
+                
+                # Context Multipliers
+                past_context = (3.5 / max(1.5, past_score)) ** 0.7 # Discount if past was easy
+                future_context = future_score / 3.5 # Boost if future is easy
+                
+                proj_points = intrinsic_pts * past_context * future_context
 
-                # 3. PREDICTED POINTS (Context Aware)
-                # Logic: Base Ability × Past Context Discount × Future Opportunity Boost
-                
-                # Past Context: If past games were easy, discount ability.
-                past_context_ratio = (3.5 / max(1.5, past_score)) ** 0.7
-                
-                # Future Context: If future games are easy, boost ability.
-                future_context_ratio = future_score / 3.5
-                
-                # Final Projection
-                proj_points = base_strength * past_context_ratio * future_context_ratio
-
-                # 4. ROI Resistance
+                # 5. Final ROI Processing
                 resistance_factor = max(2.0, min(past_score, 5.0))
                 raw_perf_metric = base_score / resistance_factor
                 
                 status_icon = "✅" if p['status'] == 'a' else ("⚠️" if p['status'] == 'd' else "❌")
 
+                # Display Stat Selection
+                stat_disp = CS_rate if pos_category in ["GK", "DEF"] else (xG + xA)
+
                 candidates.append({
                     "Name": f"{status_icon} {p['web_name']}",
                     "Team": team_names[tid],
                     "Price": price,
-                    "Stat_Display": stat_label,
+                    "Stat_Display": stat_disp,
                     "Upcoming Fixtures": future_display,
                     "PPM": ppm,
                     "Exp. Pts": proj_points,
@@ -286,94 +238,50 @@ def main():
                     "Past Fix": round(past_score, 2),
                     "Raw_Metric": raw_perf_metric,
                 })
+            except: continue
 
-            except Exception:
-                continue
-
-        # --- DATAFRAME ---
         df = pd.DataFrame(candidates)
         if df.empty: return df
 
-        # Normalize Performance (0-10)
+        # Normalize & Calculate ROI
         df['Norm_Perf'] = min_max_scale(df['Raw_Metric'])
-        
-        # Normalize Value (0-10)
         df['Value_Metric'] = df['Raw_Metric'] / df['Price']
         df['Norm_Value'] = min_max_scale(df['Value_Metric'])
-        
-        # ROI Calculation
         df['ROI Index'] = (df['Norm_Perf'] * (1 - w_budget)) + (df['Norm_Value'] * w_budget)
         
-        df = df.sort_values(by="ROI Index", ascending=False)
-        
-        cols = ["ROI Index", "Name", "Team", "Exp. Pts", "Price", "Stat_Display", "Upcoming Fixtures", "PPM", "Future Fix", "Past Fix"]
-        return df[cols]
+        return df.sort_values(by="ROI Index", ascending=False)
 
-    # --- DISPLAY ---
-    def render_tab(p_ids, pos_category, weights):
-        df = run_analysis(p_ids, pos_category, weights)
-        
-        if df.empty:
-            st.warning("No players found.")
-            return
+    # --- RENDER TABS ---
+    def render_tab(p_ids, pos_cat, weights):
+        df = run_analysis(p_ids, pos_cat, weights)
+        if df.empty: st.warning("No players found."); return
 
         # Pagination
         items_per_page = 50
-        total_items = len(df)
-        total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
+        total_pages = max(1, (len(df) + items_per_page - 1) // items_per_page)
+        if st.session_state.page >= total_pages: st.session_state.page = total_pages - 1
+        start, end = st.session_state.page * items_per_page, (st.session_state.page + 1) * items_per_page
         
-        if st.session_state.page >= total_pages:
-            st.session_state.page = total_pages - 1
-        if st.session_state.page < 0:
-            st.session_state.page = 0
-            
-        start_idx = st.session_state.page * items_per_page
-        end_idx = start_idx + items_per_page
-        
-        df_display = df.iloc[start_idx:end_idx]
-        
-        st.caption(f"Showing **{start_idx + 1}-{min(end_idx, total_items)}** of **{total_items}** players")
-        
-        stat_col_name = "CS/90" if pos_category in ["GK", "DEF"] else "xGI/90"
+        stat_label = "CS/90" if pos_cat in ["GK", "DEF"] else "xGI/90"
         
         st.dataframe(
-            df_display, 
-            hide_index=True, 
+            df.iloc[start:end], hide_index=True, use_container_width=True,
             column_config={
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
-                "Exp. Pts": st.column_config.NumberColumn(
-                    "Exp. Pts", 
-                    format="%.1f", 
-                    help="Predicted Points: Base Ability × Past Resistance Adjustment × Future Fixture Difficulty"
-                ),
+                "Exp. Pts": st.column_config.NumberColumn("Exp. Pts", format="%.1f", help="Simulated Points: (xG*Pts + xA*3 + CS*Pts) adjusted for Form & Fixtures"),
                 "Price": st.column_config.NumberColumn("£", format="£%.1f"),
-                "Stat_Display": st.column_config.NumberColumn(stat_col_name, format="%.2f", help=f"{stat_col_name} stats from FPL API"),
+                "Stat_Display": st.column_config.NumberColumn(stat_label, format="%.2f"),
                 "Upcoming Fixtures": st.column_config.TextColumn("Opponents", width="medium"),
                 "PPM": st.column_config.NumberColumn("Pts/G", format="%.1f"),
-                "Future Fix": st.column_config.NumberColumn("Fut Fix", help="Higher = Easier Upcoming Fixtures (Includes Home/Away)"),
-                "Past Fix": st.column_config.NumberColumn("Past Fix", help="Higher = Easier Past Fixtures (Includes Home/Away)"),
-            },
-            use_container_width=True
+                "Future Fix": st.column_config.NumberColumn("Fut Fix", help="Higher = Easier"),
+                "Past Fix": st.column_config.NumberColumn("Past Fix", help="Higher = Easier"),
+            }
         )
-        
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c1:
-            if st.button("⬅️ Previous 50", disabled=(st.session_state.page == 0), key=f"prev_{pos_category}"):
-                st.session_state.page -= 1
-                st.rerun()
-        with c3:
-            if st.button("Next 50 ➡️", disabled=(st.session_state.page == total_pages - 1), key=f"next_{pos_category}"):
-                st.session_state.page += 1
-                st.rerun()
+        c1, _, c3 = st.columns([1, 2, 1])
+        if c1.button("⬅️ Previous", key=f"p_{pos_cat}"): st.session_state.page -= 1; st.rerun()
+        if c3.button("Next ➡️", key=f"n_{pos_cat}"): st.session_state.page += 1; st.rerun()
 
-    # --- RENDER TABS ---
-    tab_gk, tab_def, tab_mid, tab_fwd = st.tabs([
-        "🧤 GOALKEEPERS", 
-        "🛡️ DEFENDERS", 
-        "⚔️ MIDFIELDERS", 
-        "⚽ FORWARDS"
-    ])
-
+    tab_gk, tab_def, tab_mid, tab_fwd = st.tabs(["🧤 GOALKEEPERS", "🛡️ DEFENDERS", "⚔️ MIDFIELDERS", "⚽ FORWARDS"])
     with tab_gk: render_tab([1], "GK", gk_weights)
     with tab_def: render_tab([2], "DEF", def_weights)
     with tab_mid: render_tab([3], "MID", mid_weights)
