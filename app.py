@@ -86,7 +86,7 @@ def min_max_scale(series):
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("### Weighted Model (Context Aware + Official Scoring)")
+    st.markdown("### Advanced Value Identification System")
 
     data, fixtures = load_data()
     if not data or not fixtures: return
@@ -179,29 +179,25 @@ def main():
                 CS_rate = float(p.get('clean_sheets_per_90', 0))
                 saves = float(p.get('saves_per_90', 0))
                 
-                # INTERNAL BONUS LOGIC (Not User Adjustable)
+                # INTERNAL BONUS LOGIC (Hidden Weight)
                 total_bonus = float(p.get('bonus', 0))
                 bonus_per_90 = (total_bonus / minutes) * 90
-                # Scale Bonus to 0-10 (Elite BPS players avg ~0.8-1.0 per 90)
-                # We treat this as a "Hidden Weight" of roughly 0.4 importance
                 bonus_score = min(10, bonus_per_90 * 8)
-                internal_bps_weight = 0.4 
+                internal_bps_weight = 0.4
 
-                # --- COMPONENT SCORES (0-10 Scale) ---
+                # --- ROI COMPONENT SCORES (0-10 Scale) ---
                 
-                # Attack Potential
+                # Attack Potential (xG/xA adjusted for position points)
                 attack_potential = ((xG * pts_goal) + (xA * pts_assist)) * 1.5
                 attack_score = min(10, attack_potential)
 
-                # Defense Potential
+                # Defense Potential (CS + Saves)
                 team_factor = team_def_strength[tid] / 10.0 
                 def_raw = (CS_rate * pts_cs) * team_factor
                 if pos_category == "GK": def_raw += (saves / 3)
                 def_score = min(10, def_raw * 2.0)
 
                 # --- ROI INDEX CALCULATION ---
-                # We fuse the Bonus Score into the ROI using the Internal Weight
-                
                 if pos_category == "GK":
                     base_score = (def_score * weights['cs']) + \
                                  (ppm * weights['ppm']) + \
@@ -223,24 +219,8 @@ def main():
                                  (def_component * 0.1) + \
                                  (bonus_score * internal_bps_weight)
 
-                # --- PREDICTED POINTS (Exp. Pts) ---
-                # 1. Intrinsic Match Points (Stats based)
-                exp_match_pts = (xG * pts_goal) + (xA * pts_assist) + (CS_rate * pts_cs * team_factor)
-                if pos_category == "GK": exp_match_pts += (saves / 3)
-                
-                # 2. Add Bonus Points explicitly to projection
-                total_intrinsic = exp_match_pts + bonus_per_90
-                
-                # 3. Blend with Form (PPM)
-                base_strength = (ppm * 0.4) + (total_intrinsic * 0.6)
-                
-                # 4. Context Multipliers
-                past_context = (3.5 / max(1.5, past_score)) ** 0.7
-                future_context = future_score / 3.5
-                
-                proj_points = base_strength * past_context * future_context
-
-                # --- FINAL METRICS ---
+                # --- RESISTANCE FACTOR ---
+                # Adjusts score based on past opponent difficulty
                 resistance_factor = max(2.0, min(past_score, 5.0))
                 raw_perf_metric = base_score / resistance_factor
                 
@@ -254,7 +234,6 @@ def main():
                     "Key Stat": stat_disp,
                     "Upcoming Fixtures": future_display,
                     "PPM": ppm,
-                    "Exp. Pts": proj_points,
                     "Future Fix": round(future_score, 2),
                     "Past Fix": round(past_score, 2),
                     "Raw_Metric": raw_perf_metric,
@@ -270,7 +249,10 @@ def main():
         df['Norm_Value'] = min_max_scale(df['Value_Metric'])
         df['ROI Index'] = (df['Norm_Perf'] * (1 - w_budget)) + (df['Norm_Value'] * w_budget)
         
-        return df.sort_values(by="ROI Index", ascending=False)
+        df = df.sort_values(by="ROI Index", ascending=False)
+        
+        # Return only clean columns
+        return df[["ROI Index", "Name", "Team", "Price", "Key Stat", "Upcoming Fixtures", "PPM", "Future Fix", "Past Fix"]]
 
     # --- RENDER TABS ---
     def render_tab(p_ids, pos_cat, weights):
@@ -289,7 +271,6 @@ def main():
             df.iloc[start:end], hide_index=True, use_container_width=True,
             column_config={
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
-                "Exp. Pts": st.column_config.NumberColumn("Exp. Pts", format="%.1f", help="Projected Pts including Bonus Potential & Fixtures"),
                 "Price": st.column_config.NumberColumn("£", format="£%.1f"),
                 "Key Stat": st.column_config.NumberColumn(stat_label, format="%.2f"),
                 "Upcoming Fixtures": st.column_config.TextColumn("Opponents", width="medium"),
