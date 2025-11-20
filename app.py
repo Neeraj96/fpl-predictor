@@ -46,7 +46,7 @@ def load_data():
         return bootstrap, None
     return bootstrap, fixtures
 
-# --- LOGIC ENGINE ---
+# --- ADVANCED FIXTURE ENGINE (Home/Away Specific) ---
 def process_fixtures(fixtures, teams_data):
     team_map = {t['id']: t['short_name'] for t in teams_data}
     
@@ -60,6 +60,7 @@ def process_fixtures(fixtures, teams_data):
             'def_a': t['strength_defence_away']
         }
 
+    # Init Schedule: Stores TWO tracks (Attack Potential & Defense Potential)
     team_sched = {t['id']: {'past': [], 'future': []} for t in teams_data}
 
     for f in fixtures:
@@ -67,18 +68,29 @@ def process_fixtures(fixtures, teams_data):
         
         h_id = f['team_h']
         a_id = f['team_a']
+        
+        # Get Strengths
         h_str = strengths[h_id]
         a_str = strengths[a_id]
         
-        # --- MICRO-MATCHUP RATIOS (Home/Away Aware) ---
+        # --- CALCULATE MICRO-MATCHUP RATIOS ---
+        # Ratio > 1.0 = Advantage (Good Fixture)
+        # Ratio < 1.0 = Disadvantage (Bad Fixture)
+        
         # 1. Home Team Perspective
-        h_att_ratio = h_str['att_h'] / a_str['def_a'] # Attack vs Defense
-        h_def_ratio = h_str['def_h'] / a_str['att_a'] # Defense vs Attack
+        # Home Attack vs Away Defense
+        h_att_ratio = h_str['att_h'] / a_str['def_a']
+        # Home Defense vs Away Attack
+        h_def_ratio = h_str['def_h'] / a_str['att_a']
         
         # 2. Away Team Perspective
+        # Away Attack vs Home Defense
         a_att_ratio = a_str['att_a'] / h_str['def_h']
+        # Away Defense vs Home Attack
         a_def_ratio = a_str['def_a'] / h_str['att_h']
         
+        # Create Data Objects
+        # Format: {'att': float, 'def': float, 'display': str}
         h_obj = {'att': h_att_ratio, 'def': h_def_ratio, 'display': f"{team_map[a_id]}(H)"}
         a_obj = {'att': a_att_ratio, 'def': a_def_ratio, 'display': f"{team_map[h_id]}(A)"}
         
@@ -92,11 +104,21 @@ def process_fixtures(fixtures, teams_data):
     return team_sched
 
 def get_aggregated_data(schedule_list, limit=None, mode='att'):
-    if not schedule_list: return 1.0, "-" 
+    """
+    Aggregates the specific 'mode' (att or def) from the schedule.
+    mode='att' -> For Attackers (Uses Attack vs Def ratio)
+    mode='def' -> For Defenders (Uses Def vs Att ratio)
+    """
+    if not schedule_list: return 1.0, "-" # 1.0 is neutral ratio
+    
     subset = schedule_list[:limit] if limit else schedule_list
-    # Scale Ratio (approx 0.5-1.5) to Score (approx 2.5-7.5)
+    
+    # Sum ratios and average them
+    # We multiply by 5 to map the Ratio (approx 0.5 to 1.5) to a Score (approx 2.5 to 7.5)
+    # This matches previous scaling logic for the ROI engine
     avg_ratio = sum(item[mode] for item in subset) / len(subset)
     scaled_score = avg_ratio * 5.0 
+    
     display_str = ", ".join([item['display'] for item in subset])
     return scaled_score, display_str
 
@@ -109,7 +131,7 @@ def min_max_scale(series):
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("### Context-Aware Model (Stats adjusted for Schedule)")
+    st.markdown("### Context-Aware Model (Home/Away Strength vs Opponent Strength)")
 
     data, fixtures = load_data()
     if not data or not fixtures: return
@@ -118,9 +140,8 @@ def main():
     team_names = {t['id']: t['name'] for t in teams}
     team_schedule = process_fixtures(fixtures, teams)
     
-    team_conceded = {t['id']: t['strength_defence_home'] + t['strength_defence_away'] for t in teams}
-    max_str = max(team_conceded.values()) if team_conceded else 1
-    team_def_strength = {k: 10 - ((v/max_str)*10) + 5 for k,v in team_conceded.items()}
+    # We use team strength for calculating intrinsic CS potential
+    team_def_strength = {t['id']: (t['strength_defence_home'] + t['strength_defence_away'])/200 for t in teams} # Scale approx 10
 
     # --- SIDEBAR ---
     st.sidebar.header("🔮 Prediction Horizon")
@@ -141,7 +162,7 @@ def main():
     with st.sidebar.expander("🧤 Goalkeepers", expanded=False):
         w_cs_gk = st.slider("Clean Sheet / xGC", 0.1, 1.0, 0.5, key="gk_cs", on_change=reset_page)
         w_ppm_gk = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="gk_ppm", on_change=reset_page)
-        w_fix_gk = st.slider("Fixture Favourability", 0.0, 1.0, 0.5, key="gk_fix", on_change=reset_page)
+        w_fix_gk = st.slider("Fixture Favourability", 0.1, 1.0, 0.5, key="gk_fix", on_change=reset_page)
         gk_weights = {'cs': w_cs_gk, 'ppm': w_ppm_gk, 'fix': w_fix_gk}
 
     # 2. DEFENDERS
@@ -149,21 +170,21 @@ def main():
         w_cs_def = st.slider("Clean Sheet / xGC", 0.1, 1.0, 0.5, key="def_cs", on_change=reset_page)
         w_xgi_def = st.slider("Attacking Threat (xGI)", 0.1, 1.0, 0.5, key="def_xgi", on_change=reset_page)
         w_ppm_def = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="def_ppm", on_change=reset_page)
-        w_fix_def = st.slider("Fixture Favourability", 0.0, 1.0, 0.5, key="def_fix", on_change=reset_page)
+        w_fix_def = st.slider("Fixture Favourability", 0.1, 1.0, 0.5, key="def_fix", on_change=reset_page)
         def_weights = {'cs': w_cs_def, 'xgi': w_xgi_def, 'ppm': w_ppm_def, 'fix': w_fix_def}
 
     # 3. MIDFIELDERS
     with st.sidebar.expander("⚔️ Midfielders", expanded=False):
         w_xgi_mid = st.slider("Total xGI Threat", 0.1, 1.0, 0.5, key="mid_xgi", on_change=reset_page)
         w_ppm_mid = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="mid_ppm", on_change=reset_page)
-        w_fix_mid = st.slider("Fixture Favourability", 0.0, 1.0, 0.5, key="mid_fix", on_change=reset_page)
+        w_fix_mid = st.slider("Fixture Favourability", 0.1, 1.0, 0.5, key="mid_fix", on_change=reset_page)
         mid_weights = {'xgi': w_xgi_mid, 'ppm': w_ppm_mid, 'fix': w_fix_mid}
 
     # 4. FORWARDS
     with st.sidebar.expander("⚽ Forwards", expanded=False):
         w_xgi_fwd = st.slider("Total xGI Threat", 0.1, 1.0, 0.5, key="fwd_xgi", on_change=reset_page)
         w_ppm_fwd = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="fwd_ppm", on_change=reset_page)
-        w_fix_fwd = st.slider("Fixture Favourability", 0.0, 1.0, 0.5, key="fwd_fix", on_change=reset_page)
+        w_fix_fwd = st.slider("Fixture Favourability", 0.1, 1.0, 0.5, key="fwd_fix", on_change=reset_page)
         fwd_weights = {'xgi': w_xgi_fwd, 'ppm': w_ppm_fwd, 'fix': w_fix_fwd}
 
     st.sidebar.divider()
@@ -176,12 +197,15 @@ def main():
         # Define FPL Point Values
         if pos_category in ["GK", "DEF"]:
             pts_goal, pts_cs, pts_assist = 6, 4, 3
+            # Select Defense Context for GKs/DEFs
             context_mode = 'def'
         elif pos_category == "MID":
             pts_goal, pts_cs, pts_assist = 5, 1, 3
+            # Select Attack Context for Mids
             context_mode = 'att'
         else: # FWD
             pts_goal, pts_cs, pts_assist = 4, 0, 3
+            # Select Attack Context for Fwds
             context_mode = 'att'
 
         for p in data['elements']:
@@ -189,7 +213,8 @@ def main():
             if p['minutes'] < min_minutes: continue
             tid = p['team']
             
-            # Context Data
+            # --- GET CONTEXTUAL FIXTURE SCORES ---
+            # Uses the specific mode ('att' or 'def') to get the correct Home/Away strength ratio
             past_score, _ = get_aggregated_data(team_schedule[tid]['past'], mode=context_mode)
             future_score, future_display = get_aggregated_data(team_schedule[tid]['future'], limit=horizon_option, mode=context_mode)
 
@@ -207,49 +232,42 @@ def main():
                 
                 # --- COMPONENT SCORES ---
                 
-                # 1. ATTACK SCORE (0-10)
+                # 1. ATTACK
                 raw_att_points = (xG * pts_goal) + (xA * pts_assist)
                 attack_score = min(10, raw_att_points * 8.0)
 
-                # 2. DEFENSE SCORE (0-10)
-                # Inverse xGC Score (Low xGC = High Score)
+                # 2. DEFENSE
+                # Inverse xGC Score
                 inv_xgc_score = max(0, (2.5 - xGC) * 2.0)
-                team_factor = team_def_strength[tid] / 10.0 
                 
-                # Blend CS rate with xGC and Team Strength
+                team_factor = team_def_strength[tid] / 10.0 
                 def_raw = ((CS_rate * pts_cs) * 1.5) + inv_xgc_score
                 def_score = min(10, def_raw * team_factor)
 
-                # --- BASE SCORE CONSTRUCTION ---
-                # Note: 'weights[fix]' is used later for the Multiplier
+                # --- ROI SCORE CONSTRUCTION ---
                 if pos_category == "GK":
-                    base_score = (def_score * weights['cs']) + (ppm * weights['ppm'])
+                    base_score = (def_score * weights['cs']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
                 elif pos_category == "DEF":
-                    base_score = (def_score * weights['cs']) + (attack_score * weights['xgi']) + (ppm * weights['ppm'])
+                    base_score = (def_score * weights['cs']) + (attack_score * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
                 else: # MID/FWD
                     def_component = def_score if pos_category == "MID" else 0
-                    base_score = (attack_score * weights['xgi']) + (ppm * weights['ppm']) + (def_component * 0.1)
+                    base_score = (attack_score * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix']) + (def_component * 0.1)
 
-                # --- CONTEXT MULTIPLIER (Controlled by Fixture Slider) ---
+                # --- CONTEXT RATIO ---
+                # Ratio = Future Opportunity (Score based on Team Strength Ratio) / Past Resistance
                 
-                past_resistance = max(2.0, min(past_score, 8.0))
+                # Past: Low Score = Hard (Ratio < 1.0). High Score = Easy (Ratio > 1.0)
+                # Future: High Score = Easy.
+                
+                # We want: High Future + Low Past = Maximum Boost
+                past_resistance = max(2.0, min(past_score, 8.0)) # Clamp to avoid division by zero
                 future_opportunity = max(2.0, min(future_score, 8.0))
                 
-                # The Raw Ratio
-                raw_ratio = future_opportunity / past_resistance
+                context_multiplier = future_opportunity / past_resistance
+                weighted_multiplier = context_multiplier ** 1.2
                 
-                # The Controlled Ratio
-                # If weights['fix'] is 0 -> Power is 0 -> Ratio becomes 1.0 (No effect)
-                # If weights['fix'] is 1 -> Power is 2.5 -> Ratio has massive effect
-                context_power = weights['fix'] * 2.5
-                weighted_multiplier = raw_ratio ** context_power
-                
-                # Also add specific additive bonus for easy future games
-                # This helps players with easy fixtures rise even if their ratio is neutral
-                fixture_bonus = (future_score * weights['fix'])
-                
-                # Final Calculation
-                raw_perf_metric = (base_score * weighted_multiplier) + fixture_bonus
+                # Apply to ROI
+                raw_perf_metric = base_score * weighted_multiplier
                 
                 status_icon = "✅" if p['status'] == 'a' else ("⚠️" if p['status'] == 'd' else "❌")
                 stat_disp = CS_rate if pos_category in ["GK", "DEF"] else xGI
