@@ -46,11 +46,11 @@ def load_data():
         return bootstrap, None
     return bootstrap, fixtures
 
-# --- FIXTURE ENGINE (CONTEXT AWARE) ---
+# --- FIXTURE ENGINE ---
 def process_fixtures(fixtures, teams_data):
     team_map = {t['id']: t['short_name'] for t in teams_data}
     
-    # Map Team Strengths
+    # 1. Calculate Raw Strengths
     t_stats = {}
     for t in teams_data:
         t_stats[t['id']] = {
@@ -59,30 +59,42 @@ def process_fixtures(fixtures, teams_data):
             'def_h': t['strength_defence_home'],
             'def_a': t['strength_defence_away']
         }
-    
-    # League Averages (Approximate)
-    avg_att_strength = 1080.0
-    avg_def_strength = 1080.0
-    
-    team_sched = {t['id']: {'future_opp_att': [], 'future_opp_def': [], 'display': []} for t in teams_data}
+        
+    team_sched = {t['id']: {'opp_att': [], 'opp_def': [], 'display': []} for t in teams_data}
 
     for f in fixtures:
         if not f['kickoff_time'] or f['finished']: continue
-
         h, a = f['team_h'], f['team_a']
         
-        # Store Opponent Strengths
-        # Home Team faces Away Stats
-        team_sched[h]['future_opp_att'].append(t_stats[a]['att_a'])
-        team_sched[h]['future_opp_def'].append(t_stats[a]['def_a'])
+        # Store specific strength of the opponent they are facing
+        # Home Team faces Away Att/Def
+        team_sched[h]['opp_att'].append(t_stats[a]['att_a'])
+        team_sched[h]['opp_def'].append(t_stats[a]['def_a'])
         team_sched[h]['display'].append(f"{team_map[a]}(H)")
         
-        # Away Team faces Home Stats
-        team_sched[a]['future_opp_att'].append(t_stats[h]['att_h'])
-        team_sched[a]['future_opp_def'].append(t_stats[h]['def_h'])
+        # Away Team faces Home Att/Def
+        team_sched[a]['opp_att'].append(t_stats[h]['att_h'])
+        team_sched[a]['opp_def'].append(t_stats[h]['def_h'])
         team_sched[a]['display'].append(f"{team_map[h]}(A)")
 
-    return team_sched, avg_att_strength, avg_def_strength
+    return team_sched
+
+def get_fixture_score(schedule_list, limit=None, opponent_type="def"):
+    # Returns a 0-10 score where 10 is easiest, 0 is hardest
+    if not schedule_list: return 5.0, "-"
+    
+    subset = schedule_list[:limit] if limit else schedule_list
+    
+    # Average Strength of Opponent
+    avg_strength = sum(subset) / len(subset)
+    
+    # Normalize (League Avg ~1100. Max ~1350. Min ~1000)
+    # We want Low Strength to be High Score (Easy)
+    # Formula: 1350 (Hard) -> 0, 1000 (Easy) -> 10
+    score = 10 - ((avg_strength - 1000) / 350 * 10)
+    score = max(0, min(10, score)) # Clamp
+    
+    return score
 
 def min_max_scale(series):
     if series.empty: return series
@@ -93,21 +105,22 @@ def min_max_scale(series):
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("### Contextual Model with User Controls")
+    st.markdown("### User-Controlled Weighted Model")
 
     data, fixtures = load_data()
     if not data or not fixtures: return
 
     teams = data['teams']
     team_names = {t['id']: t['name'] for t in teams}
-    team_schedule, league_avg_att, league_avg_def = process_fixtures(fixtures, teams)
+    team_schedule = process_fixtures(fixtures, teams)
     
-    # Team Defense Strength (0-10 Scale)
-    team_conceded = {t['id']: t['strength_defence_home'] + t['strength_defence_away'] for t in teams}
-    max_str = max(team_conceded.values()) if team_conceded else 1
-    min_str = min(team_conceded.values()) if team_conceded else 1
-    team_def_strength = {k: ((v - min_str) / (max_str - min_str)) * 10 for k,v in team_conceded.items()}
-
+    # Calculate dynamic maxes for normalization
+    # We need to know what "Good" looks like to scale to 0-10
+    all_elements = pd.DataFrame(data['elements'])
+    MAX_PPM = all_elements['points_per_game'].astype(float).max()
+    MAX_CS = all_elements['clean_sheets_per_90'].astype(float).max()
+    MAX_XGI = all_elements['expected_goal_involvements_per_90'].astype(float).max()
+    
     # --- SIDEBAR ---
     st.sidebar.header("🔮 Prediction Horizon")
     horizon_option = st.sidebar.selectbox(
@@ -116,41 +129,45 @@ def main():
     )
     
     st.sidebar.divider()
-    st.sidebar.header("⚖️ Model Weights")
+    st.sidebar.header("⚖️ Impact Weights")
     
-    # GLOBAL PRICE WEIGHT
-    w_budget = st.sidebar.slider("Price Importance", 0.0, 1.0, 0.5, key="price_weight", on_change=reset_page)
+    # DIRECT PRICE CONTROL
+    w_budget = st.sidebar.slider(
+        "Price Impact", 0.0, 1.0, 0.5, 
+        help="0.0 = Ignore Price (Best Players). 1.0 = Full Price Sensitivity (Best Value).",
+        key="price_weight", on_change=reset_page
+    )
     
     st.sidebar.divider()
-    st.sidebar.subheader("Position Adjustments")
+    st.sidebar.subheader("Stat Importance")
 
     # 1. GOALKEEPERS
     with st.sidebar.expander("🧤 Goalkeepers", expanded=False):
-        w_cs_gk = st.slider("Clean Sheet Ability", 0.1, 1.0, 0.6, key="gk_cs", on_change=reset_page)
-        w_ppm_gk = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="gk_ppm", on_change=reset_page)
-        w_fix_gk = st.slider("Fixture Impact", 0.1, 1.0, 0.8, help="High = Penalize hard games heavily. Low = Trust the player.", key="gk_fix", on_change=reset_page)
+        w_cs_gk = st.slider("Clean Sheet Ability", 0.0, 1.0, 1.0, key="gk_cs", on_change=reset_page)
+        w_ppm_gk = st.slider("Form (PPM)", 0.0, 1.0, 1.0, key="gk_ppm", on_change=reset_page)
+        w_fix_gk = st.slider("Fixture Ease", 0.0, 1.0, 1.0, key="gk_fix", on_change=reset_page)
         gk_weights = {'cs': w_cs_gk, 'ppm': w_ppm_gk, 'fix': w_fix_gk}
 
     # 2. DEFENDERS
     with st.sidebar.expander("🛡️ Defenders", expanded=False):
-        w_cs_def = st.slider("Clean Sheet Ability", 0.1, 1.0, 0.6, key="def_cs", on_change=reset_page)
-        w_xgi_def = st.slider("Attacking Threat", 0.1, 1.0, 0.4, key="def_xgi", on_change=reset_page)
-        w_ppm_def = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="def_ppm", on_change=reset_page)
-        w_fix_def = st.slider("Fixture Impact", 0.1, 1.0, 0.8, help="High = Wipe out CS potential vs Elite attacks.", key="def_fix", on_change=reset_page)
+        w_cs_def = st.slider("Clean Sheet Ability", 0.0, 1.0, 1.0, key="def_cs", on_change=reset_page)
+        w_xgi_def = st.slider("Attacking Threat", 0.0, 1.0, 1.0, key="def_xgi", on_change=reset_page)
+        w_ppm_def = st.slider("Form (PPM)", 0.0, 1.0, 1.0, key="def_ppm", on_change=reset_page)
+        w_fix_def = st.slider("Fixture Ease", 0.0, 1.0, 1.0, key="def_fix", on_change=reset_page)
         def_weights = {'cs': w_cs_def, 'xgi': w_xgi_def, 'ppm': w_ppm_def, 'fix': w_fix_def}
 
     # 3. MIDFIELDERS
     with st.sidebar.expander("⚔️ Midfielders", expanded=False):
-        w_xgi_mid = st.slider("Attacking Threat", 0.1, 1.0, 0.7, key="mid_xgi", on_change=reset_page)
-        w_ppm_mid = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="mid_ppm", on_change=reset_page)
-        w_fix_mid = st.slider("Fixture Impact", 0.1, 1.0, 0.6, key="mid_fix", on_change=reset_page)
+        w_xgi_mid = st.slider("Goal/Assist Threat", 0.0, 1.0, 1.0, key="mid_xgi", on_change=reset_page)
+        w_ppm_mid = st.slider("Form (PPM)", 0.0, 1.0, 1.0, key="mid_ppm", on_change=reset_page)
+        w_fix_mid = st.slider("Fixture Ease", 0.0, 1.0, 1.0, key="mid_fix", on_change=reset_page)
         mid_weights = {'xgi': w_xgi_mid, 'ppm': w_ppm_mid, 'fix': w_fix_mid}
 
     # 4. FORWARDS
     with st.sidebar.expander("⚽ Forwards", expanded=False):
-        w_xgi_fwd = st.slider("Attacking Threat", 0.1, 1.0, 0.8, key="fwd_xgi", on_change=reset_page)
-        w_ppm_fwd = st.slider("Form (PPM)", 0.1, 1.0, 0.5, key="fwd_ppm", on_change=reset_page)
-        w_fix_fwd = st.slider("Fixture Impact", 0.1, 1.0, 0.6, key="fwd_fix", on_change=reset_page)
+        w_xgi_fwd = st.slider("Goal/Assist Threat", 0.0, 1.0, 1.0, key="fwd_xgi", on_change=reset_page)
+        w_ppm_fwd = st.slider("Form (PPM)", 0.0, 1.0, 1.0, key="fwd_ppm", on_change=reset_page)
+        w_fix_fwd = st.slider("Fixture Ease", 0.0, 1.0, 1.0, key="fwd_fix", on_change=reset_page)
         fwd_weights = {'xgi': w_xgi_fwd, 'ppm': w_ppm_fwd, 'fix': w_fix_fwd}
 
     st.sidebar.divider()
@@ -165,107 +182,83 @@ def main():
             if p['minutes'] < min_minutes: continue
             tid = p['team']
             
-            # DATA EXTRACTION
-            opp_att_strengths = team_schedule[tid]['future_opp_att'][:horizon_option]
-            opp_def_strengths = team_schedule[tid]['future_opp_def'][:horizon_option]
-            fixtures_disp = ", ".join(team_schedule[tid]['display'][:horizon_option])
+            # FIXTURE SCORES (0-10 Scale)
+            # GK/DEF care about Opponent Attack Strength
+            # MID/FWD care about Opponent Defense Strength
+            if pos_category in ["GK", "DEF"]:
+                opp_sched = team_schedule[tid]['opp_att']
+            else:
+                opp_sched = team_schedule[tid]['opp_def']
             
-            if not opp_att_strengths: continue
+            # Retrieve normalized fixture score (10=Easy, 0=Hard)
+            fixture_score = get_fixture_score(opp_sched, limit=horizon_option)
+            display_fixtures = ", ".join(team_schedule[tid]['display'][:horizon_option])
 
             try:
-                # 1. BASE STATS
-                ppm = float(p['points_per_game'])
+                # RAW STATS
                 price = p['now_cost'] / 10.0
-                price = 4.0 if price <= 0 else price
+                if price <= 0: price = 4.0
                 
-                # 2. CONTEXT CALCULATIONS
-                if pos_category in ["GK", "DEF"]:
-                    # --- DEFENSIVE LOGIC ---
-                    cs_per_90 = float(p['clean_sheets_per_90'])
-                    xgi_val = float(p.get('expected_goal_involvements_per_90', 0))
-                    xgc_per_90 = float(p.get('expected_goals_conceded_per_90', 0))
-                    
-                    # Capability (Skill) Score
-                    # Invert xGC (Scale approx: 2.5 - xGC)
-                    # Logic: Skill = CS Ability + xGC Ability + Team Structure
-                    skill_score = (cs_per_90 * 20) + (max(0, 2.5 - xgc_per_90) * 3) + (team_def_strength[tid] * 0.5)
-                    
-                    # Add Attacking Threat (xGI) for Defenders if weighted
-                    # We use the user's w_xgi slider here if it exists (for DEF)
-                    attack_boost = 0
-                    if pos_category == "DEF":
-                        attack_boost = (xgi_val * 10) * weights['xgi']
+                raw_ppm = float(p['points_per_game'])
+                raw_cs = float(p['clean_sheets_per_90'])
+                raw_xgi = float(p.get('expected_goal_involvements_per_90', 0))
 
-                    # CONTEXT: Fixture Multiplier
-                    avg_opp_att = sum(opp_att_strengths) / len(opp_att_strengths)
-                    
-                    # Raw Ratio
-                    base_ratio = league_avg_att / avg_opp_att # 0.8 for Hard, 1.1 for Easy
-                    
-                    # Power Law adjusted by USER SLIDER (w_fix)
-                    # If w_fix is 1.0 -> Power 4 (Full Wipeout)
-                    # If w_fix is 0.0 -> Power 0 (Multiplier = 1.0, No Impact)
-                    power_factor = 4.0 * weights['fix']
-                    fixture_mult = base_ratio ** power_factor
-                    
-                    # Final Score Construction
-                    # (Skill * Weight * Fixture) + (Attack * Weight) + (Form * Weight)
-                    # Note: Attack boost is less affected by opponent attack strength (CS wipeout doesn't kill goal threat)
-                    context_score = (skill_score * weights['cs'] * fixture_mult) + \
-                                    attack_boost + \
-                                    (ppm * weights['ppm'])
-                    
-                    stat_disp = cs_per_90
-                    
-                else:
-                    # --- ATTACKING LOGIC ---
-                    xgi = float(p.get('expected_goal_involvements_per_90', 0))
-                    
-                    # Capability
-                    skill_score = xgi * 10 
-                    
-                    # Fixture Multiplier (Opponent Defense)
-                    avg_opp_def = sum(opp_def_strengths) / len(opp_def_strengths)
-                    base_ratio = league_avg_def / avg_opp_def
-                    
-                    # Power Law for Attackers (Usually less sensitive than Defenders)
-                    # Max Power 2.0 adjusted by User Slider
-                    power_factor = 2.0 * weights['fix']
-                    fixture_mult = base_ratio ** power_factor
-                    
-                    # Final Score
-                    context_score = (skill_score * weights['xgi'] * fixture_mult) + \
-                                    (ppm * weights['ppm'])
-                    
-                    stat_disp = xgi
+                # NORMALIZE TO 0-10 (Relative to League Best)
+                # This ensures that a weight of "1.0" on PPM means the same as "1.0" on xGI
+                score_ppm = (raw_ppm / MAX_PPM) * 10
+                score_cs = (raw_cs / MAX_CS) * 10 if MAX_CS > 0 else 0
+                score_xgi = (raw_xgi / MAX_XGI) * 10 if MAX_XGI > 0 else 0
+                score_fix = fixture_score # Already 0-10
 
-                # 3. ROI INDEX
-                roi_index = context_score / price
+                # DIRECT WEIGHTED SUM
+                total_score = 0
                 
-                # Formatting
-                status_icon = "✅" if p['status'] == 'a' else ("⚠️" if p['status'] == 'd' else "❌")
+                if pos_category == "GK":
+                    total_score = (score_cs * weights['cs']) + \
+                                  (score_ppm * weights['ppm']) + \
+                                  (score_fix * weights['fix'])
+                                  
+                elif pos_category == "DEF":
+                    total_score = (score_cs * weights['cs']) + \
+                                  (score_xgi * weights['xgi']) + \
+                                  (score_ppm * weights['ppm']) + \
+                                  (score_fix * weights['fix'])
+                                  
+                else: # MID/FWD
+                    total_score = (score_xgi * weights['xgi']) + \
+                                  (score_ppm * weights['ppm']) + \
+                                  (score_fix * weights['fix'])
+                
+                # PRICE ADJUSTMENT (Power Law)
+                # If w_budget is 0, divisor is 1.0 (Score unchanged)
+                # If w_budget is 1, divisor is Price (Score / Price)
+                price_divisor = price ** w_budget
+                roi_index = total_score / price_divisor
+                
+                stat_disp = raw_cs if pos_category in ["GK", "DEF"] else raw_xgi
 
                 candidates.append({
-                    "Name": f"{status_icon} {p['web_name']}",
+                    "Name": p['web_name'],
                     "Team": team_names[tid],
                     "Price": price,
                     "Key Stat": stat_disp,
-                    "Upcoming Fixtures": fixtures_disp,
-                    "PPM": ppm,
-                    "Context Score": round(context_score, 1),
-                    "ROI Index": roi_index
+                    "Upcoming Fixtures": display_fixtures,
+                    "PPM": raw_ppm,
+                    "Fix Score": round(fixture_score, 1),
+                    "Raw Score": roi_index # For sorting before display
                 })
             except: continue
 
         df = pd.DataFrame(candidates)
         if df.empty: return df
         
-        # Normalize ROI
-        df['ROI Index'] = min_max_scale(df['ROI Index'])
+        # Final 0-10 Scaling for the UI Bar
+        df['ROI Index'] = min_max_scale(df['Raw Score'])
         
-        return df.sort_values(by="ROI Index", ascending=False)
+        df = df.sort_values(by="ROI Index", ascending=False)
+        return df[["ROI Index", "Name", "Team", "Price", "Key Stat", "Upcoming Fixtures", "PPM", "Fix Score"]]
 
-    # --- RENDER TABS ---
+    # --- RENDER ---
     def render_tab(p_ids, pos_cat, weights):
         df = run_analysis(p_ids, pos_cat, weights)
         if df.empty: st.warning("No players found."); return
@@ -285,7 +278,7 @@ def main():
                 "Key Stat": st.column_config.NumberColumn(stat_label, format="%.2f"),
                 "Upcoming Fixtures": st.column_config.TextColumn("Opponents", width="medium"),
                 "PPM": st.column_config.NumberColumn("Pts/G", format="%.1f"),
-                "Context Score": st.column_config.NumberColumn("Ctx Score", format="%.1f", help="Combined Score before Price adjustment."),
+                "Fix Score": st.column_config.NumberColumn("Fix Rating", help="0-10 Scale. 10 = Easiest Games. 0 = Hardest Games."),
             }
         )
         c1, _, c3 = st.columns([1, 2, 1])
