@@ -86,7 +86,7 @@ def min_max_scale(series):
 # --- MAIN APP ---
 def main():
     st.title("🧠 FPL Pro Predictor: ROI Engine")
-    st.markdown("### Official Scoring Model (Goals/Assists/CS Weighting)")
+    st.markdown("### Weighted Model with Bonus Point Logic")
 
     data, fixtures = load_data()
     if not data or not fixtures: return
@@ -163,7 +163,6 @@ def main():
             if p['minutes'] < min_minutes: continue
             tid = p['team']
             
-            # Fixtures
             past_score, _ = get_aggregated_data(team_schedule[tid]['past'])
             future_score, future_display = get_aggregated_data(team_schedule[tid]['future'], limit=horizon_option)
 
@@ -171,66 +170,67 @@ def main():
                 ppm = float(p['points_per_game'])
                 price = p['now_cost'] / 10.0
                 price = 4.0 if price <= 0 else price
+                minutes = float(p['minutes']) if p['minutes'] > 0 else 1
                 
-                # Stats Extraction
-                # We split xGI into Goals and Assists to apply correct multipliers
+                # Underlying Stats
                 xG = float(p.get('expected_goals_per_90', 0))
                 xA = float(p.get('expected_assists_per_90', 0))
+                xGI = float(p.get('expected_goal_involvements_per_90', 0))
                 CS_rate = float(p.get('clean_sheets_per_90', 0))
                 saves = float(p.get('saves_per_90', 0))
-
-                # --- CORE CALCULATION ---
                 
-                # 1. Intrinsic 'Attack Value' (0-10 scale approximation)
-                # Calculating raw expected attack points per 90 based on rules
-                raw_attack_pts = (xG * pts_goal) + (xA * pts_assist)
-                attack_score = min(10, raw_attack_pts * 1.5) # Scale up for index
+                # BONUS Calculation
+                # We use total 'bonus' awarded divided by time played to get a "Bonus Per 90" rate
+                total_bonus = float(p.get('bonus', 0))
+                bonus_per_90 = (total_bonus / minutes) * 90
 
-                # 2. Intrinsic 'Defense Value' (0-10 scale approximation)
-                # Blend player CS history with Team Strength
-                team_factor = team_def_strength[tid] / 10.0 # 0.5 to 1.5 multiplier roughly
-                raw_def_pts = (CS_rate * pts_cs) * team_factor
-                if pos_category == "GK": raw_def_pts += (saves / 3) # 1pt per 3 saves
-                def_score = min(10, raw_def_pts * 2.0)
-
-                # 3. ROI Index Score Construction
-                # We mix the specific scores based on the USER SLIDERS
+                # --- SCORES ---
+                
+                # 1. Attack Score (0-10)
+                attack_potential = ((xG * pts_goal) + (xA * pts_assist)) * 1.5
+                
+                # 2. Defense Score (0-10)
+                team_factor = team_def_strength[tid] / 10.0 
+                def_potential = (CS_rate * pts_cs) * team_factor
+                if pos_category == "GK": def_potential += (saves / 3)
+                
+                # 3. ROI Index Calculation (Uses User Weights)
                 if pos_category == "GK":
-                    base_score = (def_score * weights['cs']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
+                    base_score = (min(10, def_potential*2) * weights['cs']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
                 elif pos_category == "DEF":
-                    base_score = (def_score * weights['cs']) + (attack_score * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
-                else: # MID/FWD
-                    # Mids get modest CS points, so we add def_score slightly for Mids
-                    def_component = def_score if pos_category == "MID" else 0
-                    base_score = (attack_score * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix']) + (def_component * 0.1)
+                    base_score = (min(10, def_potential*2) * weights['cs']) + (min(10, attack_potential) * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
+                else:
+                    base_score = (min(10, attack_potential) * weights['xgi']) + (ppm * weights['ppm']) + (future_score * weights['fix'])
 
-                # 4. PREDICTED POINTS (The "Exp. Pts" Display)
-                # This uses the literal FPL scoring rules + Form + Fixture Multiplier
+                # 4. PREDICTED POINTS Calculation
+                # Formula: (Form + xP + Bonus Potential) * Fixture Multiplier
                 
-                # Intrinsic Points per Match (The math model)
-                # Blend: 50% History (PPM) + 50% Underlying Stats (xG/xA/CS)
-                intrinsic_pts = (ppm * 0.5) + ((raw_attack_pts + raw_def_pts) * 0.5)
+                # a. Expected Match Points based on stats
+                exp_match_pts = (xG * pts_goal) + (xA * pts_assist) + (CS_rate * pts_cs * team_factor)
+                if pos_category == "GK": exp_match_pts += (saves / 3)
                 
-                # Context Multipliers
-                past_context = (3.5 / max(1.5, past_score)) ** 0.7 # Discount if past was easy
-                future_context = future_score / 3.5 # Boost if future is easy
+                # b. Baseline Strength (Blend of PPM and xP + Bonus)
+                # We weigh underlying stats + bonus slightly higher than raw PPM for prediction
+                base_strength = (ppm * 0.4) + (exp_match_pts * 0.4) + (bonus_per_90 * 0.6)
                 
-                proj_points = intrinsic_pts * past_context * future_context
+                # c. Context
+                past_context = (3.5 / max(1.5, past_score)) ** 0.7
+                future_context = future_score / 3.5
+                
+                proj_points = base_strength * past_context * future_context
 
-                # 5. Final ROI Processing
+                # 5. ROI Processing
                 resistance_factor = max(2.0, min(past_score, 5.0))
                 raw_perf_metric = base_score / resistance_factor
                 
                 status_icon = "✅" if p['status'] == 'a' else ("⚠️" if p['status'] == 'd' else "❌")
-
-                # Display Stat Selection
-                stat_disp = CS_rate if pos_category in ["GK", "DEF"] else (xG + xA)
+                stat_disp = CS_rate if pos_category in ["GK", "DEF"] else xGI
 
                 candidates.append({
                     "Name": f"{status_icon} {p['web_name']}",
                     "Team": team_names[tid],
                     "Price": price,
-                    "Stat_Display": stat_disp,
+                    "Key Stat": stat_disp,
                     "Upcoming Fixtures": future_display,
                     "PPM": ppm,
                     "Exp. Pts": proj_points,
@@ -268,9 +268,9 @@ def main():
             df.iloc[start:end], hide_index=True, use_container_width=True,
             column_config={
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
-                "Exp. Pts": st.column_config.NumberColumn("Exp. Pts", format="%.1f", help="Simulated Points: (xG*Pts + xA*3 + CS*Pts) adjusted for Form & Fixtures"),
+                "Exp. Pts": st.column_config.NumberColumn("Exp. Pts", format="%.1f", help="Projected Pts including Bonus Potential & Fixtures"),
                 "Price": st.column_config.NumberColumn("£", format="£%.1f"),
-                "Stat_Display": st.column_config.NumberColumn(stat_label, format="%.2f"),
+                "Key Stat": st.column_config.NumberColumn(stat_label, format="%.2f"),
                 "Upcoming Fixtures": st.column_config.TextColumn("Opponents", width="medium"),
                 "PPM": st.column_config.NumberColumn("Pts/G", format="%.1f"),
                 "Future Fix": st.column_config.NumberColumn("Fut Fix", help="Higher = Easier"),
