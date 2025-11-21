@@ -28,16 +28,13 @@ API_BASE = "https://fantasy.premierleague.com/api"
 
 @st.cache_data(persist="disk") 
 def load_training_data():
-    """
-    Loads historical data.
-    """
     if os.path.exists("fpl_5_year_history.csv"):
         df = pd.read_csv("fpl_5_year_history.csv")
     else:
+        # Fallback Downloader
         seasons = ["2020-21", "2021-22", "2022-23", "2023-24", "2024-25", "2025-26"]
         base_url = "https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data"
         all_data = []
-        
         for season in seasons:
             try:
                 url = f"{base_url}/{season}/gws/merged_gw.csv"
@@ -45,34 +42,28 @@ def load_training_data():
                 if r.status_code == 200:
                     temp_df = pd.read_csv(io.BytesIO(r.content), on_bad_lines='skip', low_memory=False)
                     
-                    # We load influence/goals here just for the dataframe, 
-                    # BUT we will NOT use them in training below.
-                    desired_cols = [
-                        'minutes', 'total_points', 'was_home', 'clean_sheets', 
-                        'goals_conceded', 'expected_goals', 'expected_assists', 
-                        'expected_goals_conceded', 'creativity', 'threat', 
-                        'value', 'element_type', 'position', 
-                        'goals_scored', 'assists', 'saves', 'bps', 'yellow_cards'
-                    ]
+                    cols = ['minutes', 'total_points', 'was_home', 'clean_sheets', 
+                            'goals_conceded', 'expected_goals', 'expected_assists', 
+                            'expected_goals_conceded', 'influence', 'creativity', 'threat', 
+                            'value', 'element_type', 'position', 
+                            'goals_scored', 'assists', 'saves', 'bps', 'yellow_cards']
                     
-                    available_cols = [c for c in desired_cols if c in temp_df.columns]
-                    temp_df = temp_df[available_cols]
+                    existing = [c for c in cols if c in temp_df.columns]
+                    temp_df = temp_df[existing]
                     all_data.append(temp_df)
             except: pass
-            
         if all_data:
             df = pd.concat(all_data, ignore_index=True).fillna(0)
         else:
             return None
 
-    # --- SANITIZATION ---
+    # Sanitization
     if 'element_type' not in df.columns:
         if 'position' in df.columns:
             pos_map = {'GK': 1, 'DEF': 2, 'MID': 3, 'FWD': 4, 'GKP': 1}
             df['element_type'] = df['position'].map(pos_map).fillna(3).astype(int)
         else:
             df['element_type'] = 3
-            
     df['element_type'] = pd.to_numeric(df['element_type'], errors='coerce').fillna(3).astype(int)
     
     return df
@@ -82,21 +73,33 @@ def train_dual_models():
     df = load_training_data()
     if df is None: return None, None, None, None, None, None
     
+    # Filter Starters (>60 mins)
     if 'minutes' in df.columns:
         df = df[df['minutes'] > 60].copy()
     
     # --- SPLIT DATASETS ---
-    df_def = df[df['element_type'].isin([1, 2])] # GK/DEF
-    df_att = df[df['element_type'].isin([3, 4])] # MID/FWD
+    df_def = df[df['element_type'].isin([1, 2])].copy() # GK/DEF
+    df_att = df[df['element_type'].isin([3, 4])].copy() # MID/FWD
     
+    # --- FIX: CLEAN DATA FOR DEFENDERS ---
+    # Remove rows where xGC is 0.0 (Missing data from old seasons)
+    # This forces AI to learn only from matches where xGC was tracked.
+    if 'expected_goals_conceded' in df_def.columns:
+        # Only keep rows where xGC > 0 (Unless it was a literal 0.00 xGC game, which is rare)
+        # We assume 0.0 usually means "Stat not recorded" in older data
+        df_def = df_def[df_def['expected_goals_conceded'] > 0]
+
     # --- MODEL 1: DEFENSIVE SPECIALIST ---
-    # REMOVED: influence, clean_sheets, goals_conceded, bps
-    # ADDED: xGC (Defense), Threat/Creativity (Attack Potential)
+    # Removed 'creativity' to stop it obsessing over assists.
+    # Added 'influence' (Defensive Actions) and 'bps' (Bonus)
+    # Added 'saves' for GKs
     feats_def = [
+        'expected_goals_conceded', # Primary Defensive Stat
+        'influence',               # Blocks/Tackles/Clearances
         'minutes', 'was_home', 'element_type',
-        'expected_goals_conceded', # PRIMARY STAT
-        'threat', 'creativity',    # SECONDARY (Fullback points)
+        'threat',                  # Goal threat (Headers)
         'expected_goals', 'expected_assists', 
+        'saves', 'bps',
         'yellow_cards'
     ]
     valid_feats_def = [f for f in feats_def if f in df_def.columns]
@@ -111,12 +114,11 @@ def train_dual_models():
         imp_def = pd.DataFrame()
 
     # --- MODEL 2: ATTACKING SPECIALIST ---
-    # REMOVED: influence, goals_scored, assists, bps
-    # FOCUSED ON: xG, xA, Threat, Creativity
     feats_att = [
-        'minutes', 'was_home', 'element_type',
         'expected_goals', 'expected_assists', 
-        'threat', 'creativity', 
+        'threat', 'creativity', 'influence', 
+        'minutes', 'was_home', 'element_type',
+        'bps',
         'yellow_cards'
     ]
     valid_feats_att = [f for f in feats_att if f in df_att.columns]
@@ -197,7 +199,7 @@ def main():
     st.title("🧬 FPL Pro: Hybrid Intelligence")
     
     # 1. Load & Train
-    with st.spinner("Training Specialist AI Models (Pure xStats)..."):
+    with st.spinner("Training Specialist AI Models (Filtered Data)..."):
         model_def, feat_def, model_att, feat_att, max_ai_pts, (imp_def, imp_att) = train_dual_models()
     
     if model_def is None:
@@ -215,7 +217,7 @@ def main():
     df['matches_played'] = df['minutes'] / 90
     df = df[df['matches_played'] > 2.0]
     
-    # AI Input Prep
+    # AI Input Prep (Universal Mapping)
     ai_input = pd.DataFrame()
     ai_input['element_type'] = df['element_type']
     ai_input['was_home'] = 0.5
@@ -225,13 +227,14 @@ def main():
         'expected_goals': 'expected_goals_per_90',
         'expected_assists': 'expected_assists_per_90',
         'expected_goals_conceded': 'expected_goals_conceded_per_90',
-        'creativity': 'creativity', 'threat': 'threat',
-        'yellow_cards': 'yellow_cards'
+        'influence': 'influence', 'creativity': 'creativity', 'threat': 'threat',
+        'saves': 'saves', 'bps': 'bps', 'yellow_cards': 'yellow_cards'
     }
     
     for train_col, api_col in stat_map.items():
-        # Map columns only if they are used in the training lists
-        if (train_col in feat_def) or (train_col in feat_att):
+        # Check both lists
+        needed = (train_col in feat_def) or (train_col in feat_att)
+        if needed:
             if 'per_90' in api_col:
                 ai_input[train_col] = pd.to_numeric(df[api_col], errors='coerce').fillna(0)
             else:
@@ -254,7 +257,7 @@ def main():
     st.sidebar.header("🧠 Dual-Brain Scan")
     brain_tab1, brain_tab2 = st.sidebar.tabs(["Def", "Att"])
     if not imp_def.empty:
-        brain_tab1.caption("Top stats for Defenders:")
+        brain_tab1.caption("Top stats for Defenders (xGC Focused):")
         brain_tab1.dataframe(imp_def.head(7).style.format({"Weight": "{:.1f}%"}), hide_index=True)
     if not imp_att.empty:
         brain_tab2.caption("Top stats for Attackers:")
@@ -266,7 +269,6 @@ def main():
     
     st.sidebar.divider()
     st.sidebar.header("⚖️ Weights")
-    
     w_budget = st.sidebar.slider("Price Sensitivity", 0.0, 1.0, 0.5)
     
     with st.sidebar.expander("🧤 GK Settings", expanded=False):
@@ -285,6 +287,7 @@ def main():
     def run_engine(p_ids, cat, w):
         cands = []
         subset = df[df['element_type'].isin(p_ids) & (df['minutes'] >= min_mins)]
+        
         if subset.empty: return pd.DataFrame()
 
         MAX_PPM = subset['points_per_game'].astype(float).max()
