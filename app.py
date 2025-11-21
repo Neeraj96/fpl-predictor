@@ -31,11 +31,9 @@ def load_training_data():
     if os.path.exists("fpl_5_year_history.csv"):
         df = pd.read_csv("fpl_5_year_history.csv")
     else:
-        # Fallback Downloader
         seasons = ["2020-21", "2021-22", "2022-23", "2023-24", "2024-25", "2025-26"]
         base_url = "https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data"
         all_data = []
-        
         for season in seasons:
             try:
                 url = f"{base_url}/{season}/gws/merged_gw.csv"
@@ -43,17 +41,14 @@ def load_training_data():
                 if r.status_code == 200:
                     temp_df = pd.read_csv(io.BytesIO(r.content), on_bad_lines='skip', low_memory=False)
                     
-                    # REMOVED 'influence' from load list
-                    desired_cols = [
-                        'minutes', 'total_points', 'was_home', 'clean_sheets', 
-                        'goals_conceded', 'expected_goals', 'expected_assists', 
-                        'expected_goals_conceded', 'creativity', 'threat', 
-                        'value', 'element_type', 'position', 
-                        'goals_scored', 'assists', 'saves', 'bps', 'yellow_cards'
-                    ]
+                    cols = ['minutes', 'total_points', 'was_home', 'clean_sheets', 
+                            'goals_conceded', 'expected_goals', 'expected_assists', 
+                            'expected_goals_conceded', 'influence', 'creativity', 'threat', 
+                            'value', 'element_type', 'position', 
+                            'goals_scored', 'assists', 'saves', 'bps', 'yellow_cards']
                     
-                    available_cols = [c for c in desired_cols if c in temp_df.columns]
-                    temp_df = temp_df[available_cols]
+                    existing = [c for c in cols if c in temp_df.columns]
+                    temp_df = temp_df[existing]
                     all_data.append(temp_df)
             except: pass
             
@@ -62,7 +57,6 @@ def load_training_data():
         else:
             return None
 
-    # --- SANITIZATION ---
     if 'element_type' not in df.columns:
         if 'position' in df.columns:
             pos_map = {'GK': 1, 'DEF': 2, 'MID': 3, 'FWD': 4, 'GKP': 1}
@@ -82,22 +76,15 @@ def train_dual_models():
     if 'minutes' in df.columns:
         df = df[df['minutes'] > 60].copy()
     
-    # --- SPLIT DATASETS ---
-    df_def = df[df['element_type'].isin([1, 2])].copy() # GK/DEF
-    df_att = df[df['element_type'].isin([3, 4])].copy() # MID/FWD
+    df_def = df[df['element_type'].isin([1, 2])].copy() 
+    df_att = df[df['element_type'].isin([3, 4])].copy() 
     
-    # --- CLEAN XGC DATA ---
-    # Force AI to learn from rows where xGC exists
-    if 'expected_goals_conceded' in df_def.columns:
-        df_def = df_def[df_def['expected_goals_conceded'] > 0]
-
-    # --- MODEL 1: DEFENSIVE SPECIALIST ---
-    # STRICTLY REMOVED: influence, clean_sheets, goals_conceded, bps
-    # INCLUDED: xGC, Threat, Creativity
+    # --- MODEL 1: DEFENSIVE AI (Now purely Attacking Upside/BPS focused) ---
+    # REMOVED: xGC (Moved to Manual), Influence
+    # KEEPS: Threat, Creativity, xG, xA (To find attacking defenders)
     feats_def = [
         'minutes', 'was_home', 'element_type',
-        'expected_goals_conceded', # <--- PRIMARY STAT
-        'threat', 'creativity',    # Secondary (Attacking Upside)
+        'threat', 'creativity', 
         'expected_goals', 'expected_assists', 
         'yellow_cards'
     ]
@@ -112,8 +99,7 @@ def train_dual_models():
         model_def = None
         imp_def = pd.DataFrame()
 
-    # --- MODEL 2: ATTACKING SPECIALIST ---
-    # STRICTLY REMOVED: influence, goals, assists, bps
+    # --- MODEL 2: ATTACKING AI ---
     feats_att = [
         'minutes', 'was_home', 'element_type',
         'expected_goals', 'expected_assists', 
@@ -139,7 +125,7 @@ def train_dual_models():
     return model_def, valid_feats_def, model_att, valid_feats_att, max_pts, (imp_def, imp_att)
 
 # =========================================
-# 2. LIVE DATA & FIXTURE ENGINE
+# 2. FIXTURE ENGINE
 # =========================================
 
 @st.cache_data(ttl=1800)
@@ -197,36 +183,31 @@ def min_max_scale(series):
 def main():
     st.title("🧬 FPL Pro: Hybrid Intelligence")
     
-    # 1. Load & Train
-    with st.spinner("Training Pure xStats Models (No Influence)..."):
+    with st.spinner("Training AI Models (Upside Focus)..."):
         model_def, feat_def, model_att, feat_att, max_ai_pts, (imp_def, imp_att) = train_dual_models()
     
     if model_def is None:
         st.warning("⚠️ Downloading Data... (Wait 30s)")
         return
 
-    # 2. Live Data
     static, fixtures = get_live_data()
     teams = static['teams']
     team_names = {t['id']: t['name'] for t in teams}
     team_sched, avg_str = process_fixtures(fixtures, teams)
     
-    # 3. Prepare Player Data
     df = pd.DataFrame(static['elements'])
     df['matches_played'] = df['minutes'] / 90
     df = df[df['matches_played'] > 2.0]
     
-    # AI Input Prep
     ai_input = pd.DataFrame()
     ai_input['element_type'] = df['element_type']
     ai_input['was_home'] = 0.5
     
-    # REMOVED INFLUENCE from Map
+    # Stat Map (xGC removed from here too)
     stat_map = {
         'minutes': 'minutes',
         'expected_goals': 'expected_goals_per_90',
         'expected_assists': 'expected_assists_per_90',
-        'expected_goals_conceded': 'expected_goals_conceded_per_90',
         'creativity': 'creativity', 'threat': 'threat',
         'yellow_cards': 'yellow_cards'
     }
@@ -239,27 +220,18 @@ def main():
                 ai_input[train_col] = pd.to_numeric(df[api_col], errors='coerce').fillna(0) / df['matches_played']
             
     # --- DUAL PREDICTION ---
-    if model_def:
-        pred_def = model_def.predict(ai_input[feat_def])
-    else:
-        pred_def = 0
-        
-    if model_att:
-        pred_att = model_att.predict(ai_input[feat_att])
-    else:
-        pred_att = 0
+    if model_def: pred_def = model_def.predict(ai_input[feat_def])
+    else: pred_def = 0
+    if model_att: pred_att = model_att.predict(ai_input[feat_att])
+    else: pred_att = 0
     
     df['AI_Points'] = np.where(df['element_type'].isin([1, 2]), pred_def, pred_att)
     
     # --- UI ---
-    st.sidebar.header("🧠 Dual-Brain Scan")
-    brain_tab1, brain_tab2 = st.sidebar.tabs(["Def", "Att"])
-    if not imp_def.empty:
-        brain_tab1.caption("Top stats for Defenders (Clean):")
-        brain_tab1.dataframe(imp_def.head(7).style.format({"Weight": "{:.1f}%"}), hide_index=True)
-    if not imp_att.empty:
-        brain_tab2.caption("Top stats for Attackers (Clean):")
-        brain_tab2.dataframe(imp_att.head(7).style.format({"Weight": "{:.1f}%"}), hide_index=True)
+    st.sidebar.header("🧠 Brain Scan")
+    brain_tab1, brain_tab2 = st.sidebar.tabs(["Def AI", "Att AI"])
+    if not imp_def.empty: brain_tab1.dataframe(imp_def.head(7).style.format({"Weight": "{:.1f}%"}), hide_index=True)
+    if not imp_att.empty: brain_tab2.dataframe(imp_att.head(7).style.format({"Weight": "{:.1f}%"}), hide_index=True)
     
     st.sidebar.divider()
     st.sidebar.header("🔮 Horizon")
@@ -269,14 +241,34 @@ def main():
     st.sidebar.header("⚖️ Weights")
     w_budget = st.sidebar.slider("Price Sensitivity", 0.0, 1.0, 0.5)
     
+    # SLIDERS: Added xGC for GK/DEF
     with st.sidebar.expander("🧤 GK Settings", expanded=False):
-        w_gk = {'ai': st.slider("AI (xGC/Stats)", 0.0, 1.0, 0.6, key="g1"), 'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="g2"), 'fix': st.slider("Fixture Impact", 0.0, 1.0, 1.0, key="g3")}
+        w_gk = {
+            'ai': st.slider("AI (Stats)", 0.0, 1.0, 0.4, key="g1"),
+            'xgc': st.slider("Defensive Solidity (xGC)", 0.0, 1.0, 0.8, help="Low xGC = High Score", key="g_xgc"),
+            'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="g2"),
+            'fix': st.slider("Fixture Impact", 0.0, 1.0, 1.0, key="g3")
+        }
     with st.sidebar.expander("🛡️ DEF Settings", expanded=False):
-        w_def = {'ai': st.slider("AI (xGC/Stats)", 0.0, 1.0, 0.6, key="d1"), 'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="d2"), 'xgi': st.slider("Att Bonus", 0.0, 1.0, 0.3, key="d3"), 'fix': st.slider("Fixture Impact", 0.0, 1.0, 1.0, key="d4")}
+        w_def = {
+            'ai': st.slider("AI (Stats)", 0.0, 1.0, 0.4, key="d1"),
+            'xgc': st.slider("Defensive Solidity (xGC)", 0.0, 1.0, 0.8, help="Low xGC = High Score", key="d_xgc"),
+            'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="d2"),
+            'xgi': st.slider("Att Bonus (xGI)", 0.0, 1.0, 0.3, key="d3"),
+            'fix': st.slider("Fixture Impact", 0.0, 1.0, 1.0, key="d4")
+        }
     with st.sidebar.expander("⚔️ MID Settings", expanded=False):
-        w_mid = {'ai': st.slider("AI (xG/xA/Stats)", 0.0, 1.0, 0.6, key="m1"), 'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="m2"), 'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.8, key="m3")}
+        w_mid = {
+            'ai': st.slider("AI (Stats)", 0.0, 1.0, 0.6, key="m1"),
+            'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="m2"),
+            'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.8, key="m3")
+        }
     with st.sidebar.expander("⚽ FWD Settings", expanded=False):
-        w_fwd = {'ai': st.slider("AI (xG/xA/Stats)", 0.0, 1.0, 0.6, key="f1"), 'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="f2"), 'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.8, key="f3")}
+        w_fwd = {
+            'ai': st.slider("AI (Stats)", 0.0, 1.0, 0.6, key="f1"),
+            'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="f2"),
+            'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.8, key="f3")
+        }
 
     st.sidebar.divider()
     min_mins = st.sidebar.slider("Min Minutes", 0, 2500, 400)
@@ -290,6 +282,7 @@ def main():
         for _, row in subset.iterrows():
             tid = row['team']
             
+            # 1. CONTEXT
             if cat in ["GK", "DEF"]:
                 sched = team_sched[tid]['fut_opp_att']
                 mode = "def"
@@ -301,18 +294,34 @@ def main():
             fix_score_display = get_display_score(sched, horizon)
             fix_display = ", ".join(team_sched[tid]['display'][:horizon])
             
+            # 2. SCORES
             score_ai = (row['AI_Points'] / max_ai_pts) * 10
             raw_ppm = float(row['points_per_game'])
             score_form = (raw_ppm / MAX_PPM) * 10
+            
+            # Manual xGC Calculation (Inverted: Low xGC is Good)
+            score_xgc = 0
+            if cat in ["GK", "DEF"]:
+                raw_xgc = float(row['expected_goals_conceded_per_90'])
+                # Normalize: 2.5 is bad (0), 0.5 is good (10)
+                score_xgc = max(0, min(10, (2.5 - raw_xgc) * 5))
             
             score_bonus = 0
             if cat == "DEF":
                 xgi = float(row['expected_goal_involvements_per_90'])
                 score_bonus = (xgi * 10) * w['xgi']
             
-            base_score = (score_ai * w['ai']) + (score_form * w['form']) + score_bonus
+            # 3. BLEND
+            # GK/DEF use 'xgc' weight. MID/FWD do not.
+            if cat in ["GK", "DEF"]:
+                base_score = (score_ai * w['ai']) + (score_xgc * w['xgc']) + (score_form * w['form']) + score_bonus
+            else:
+                base_score = (score_ai * w['ai']) + (score_form * w['form'])
+            
+            # 4. CONTEXT
             final_score = base_score * eff_mult
             
+            # 5. ROI
             price = row['now_cost'] / 10.0
             price_div = price ** w_budget
             roi = final_score / price_div
@@ -343,10 +352,10 @@ def main():
         
         if cat in ["GK", "DEF"]:
             stat_lbl = "xGC/90"
-            stat_tip = "Exp. Goals Conceded (Lower is Better). Used by Def AI."
+            stat_tip = "Exp. Goals Conceded (Lower is Better). Manual Weight."
         else:
             stat_lbl = "xGI/90"
-            stat_tip = "Exp. Goal Involvement (Higher is Better). Used by Att AI."
+            stat_tip = "Exp. Goal Involvement (Higher is Better). Used by AI."
         
         st.dataframe(
             d.head(50), hide_index=True, use_container_width=True,
@@ -354,7 +363,7 @@ def main():
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
                 "Price": st.column_config.NumberColumn("£", format="£%.1f"),
                 "Upcoming": st.column_config.TextColumn("Opponents", width="medium"),
-                "AI Base": st.column_config.NumberColumn("AI Exp", help="Points predicted by AI using Underlying Stats"),
+                "AI Base": st.column_config.NumberColumn("AI Exp", help="Points predicted by AI"),
                 "PPM": st.column_config.NumberColumn("Form", help="Actual Points Per Match"),
                 "Fix Rate": st.column_config.NumberColumn("Fix Rating", help="10=Easy, 0=Hard"),
                 "Key Stat": st.column_config.NumberColumn(stat_lbl, format="%.2f", help=stat_tip)
