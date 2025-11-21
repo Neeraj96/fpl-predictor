@@ -46,11 +46,10 @@ def load_data():
         return bootstrap, None
     return bootstrap, fixtures
 
-# --- FIXTURE ENGINE (PAST & FUTURE) ---
+# --- FIXTURE ENGINE ---
 def process_fixtures(fixtures, teams_data):
     team_map = {t['id']: t['short_name'] for t in teams_data}
     
-    # 1. Calculate Raw Strengths
     t_stats = {}
     for t in teams_data:
         t_stats[t['id']] = {
@@ -60,58 +59,49 @@ def process_fixtures(fixtures, teams_data):
             'def_a': t['strength_defence_away']
         }
         
-    # Containers for Past (Context) and Future (Opportunity)
-    team_sched = {t['id']: {'past_opp_att': [], 'past_opp_def': [], 'fut_opp_att': [], 'fut_opp_def': [], 'fut_disp': []} for t in teams_data}
+    team_sched = {t['id']: {'past_opp_att': [], 'past_opp_def': [], 'fut_opp_att': [], 'fut_opp_def': [], 'display': []} for t in teams_data}
 
     for f in fixtures:
         if not f['kickoff_time']: continue
         h, a = f['team_h'], f['team_a']
         
-        # Determine Opponent Strengths
-        # Home Team faces Away Stats
+        # Opponent Stats
         h_opp_att = t_stats[a]['att_a']
         h_opp_def = t_stats[a]['def_a']
-        
-        # Away Team faces Home Stats
         a_opp_att = t_stats[h]['att_h']
         a_opp_def = t_stats[h]['def_h']
 
         if f['finished']:
-            # PAST: We store what they faced to calculate "Resistance"
+            # PAST: For calculating Resistance
             team_sched[h]['past_opp_att'].append(h_opp_att)
             team_sched[h]['past_opp_def'].append(h_opp_def)
-            
             team_sched[a]['past_opp_att'].append(a_opp_att)
             team_sched[a]['past_opp_def'].append(a_opp_def)
         else:
-            # FUTURE: We store what they will face
+            # FUTURE: For calculating Opportunity
             team_sched[h]['fut_opp_att'].append(h_opp_att)
             team_sched[h]['fut_opp_def'].append(h_opp_def)
-            team_sched[h]['fut_disp'].append(f"{team_map[a]}(H)")
+            team_sched[h]['display'].append(f"{team_map[a]}(H)")
             
             team_sched[a]['fut_opp_att'].append(a_opp_att)
             team_sched[a]['fut_opp_def'].append(a_opp_def)
-            team_sched[a]['fut_disp'].append(f"{team_map[h]}(A)")
+            team_sched[a]['display'].append(f"{team_map[h]}(A)")
 
     return team_sched
 
 def get_fixture_score(schedule_list, limit=None):
-    # 0-10 Scale for Future Difficulty (High = Easy)
-    if not schedule_list: return 5.0, "-"
+    # Returns 0-10 (10 = Easy)
+    if not schedule_list: return 5.0
     subset = schedule_list[:limit] if limit else schedule_list
     avg_strength = sum(subset) / len(subset)
-    # Normalize: 1350(Hard) -> 0, 1000(Easy) -> 10
-    score = 10 - ((avg_strength - 1000) / 350 * 10)
+    score = 10 - ((avg_strength - 1000) / 350 * 10) # Normalize 1000-1350 to 10-0
     return max(0, min(10, score))
 
 def get_resistance_factor(past_strengths):
-    # Returns a multiplier (e.g. 0.9 or 1.1) based on past difficulty
+    # Returns multiplier (High = Played Hard Teams = Boost)
     if not past_strengths: return 1.0
     avg_strength = sum(past_strengths) / len(past_strengths)
-    # League Avg ~ 1100.
-    # If Avg Opp Strength was 1000 (Easy), Factor = 1000/1100 = 0.90 (Discount points)
-    # If Avg Opp Strength was 1300 (Hard), Factor = 1300/1100 = 1.18 (Boost points)
-    return avg_strength / 1100.0
+    return avg_strength / 1080.0 # ~League Avg
 
 def min_max_scale(series):
     if series.empty: return series
@@ -121,8 +111,8 @@ def min_max_scale(series):
 
 # --- MAIN APP ---
 def main():
-    st.title("🧠 FPL Pro Predictor: Contextual ROI Engine")
-    st.markdown("### Context-Adjusted Model (Past Resistance × Future Opportunity)")
+    st.title("🧠 FPL Pro Predictor: ROI Engine")
+    st.markdown("### Advanced Weighted Model (xGC Integrated)")
 
     data, fixtures = load_data()
     if not data or not fixtures: return
@@ -131,10 +121,18 @@ def main():
     team_names = {t['id']: t['name'] for t in teams}
     team_schedule = process_fixtures(fixtures, teams)
     
-    # Normalization Maxima
+    # Calculate Team Defensive Strength (0-10) for the composite metric
+    # We need this because a player on Man City has higher CS potential than one on Ipswich
+    # even if their personal stats are identical.
+    team_conceded = {t['id']: t['strength_defence_home'] + t['strength_defence_away'] for t in teams}
+    max_str = max(team_conceded.values()) if team_conceded else 1
+    min_str = min(team_conceded.values()) if team_conceded else 1
+    # Invert: High Strength ID (1350) = Good Defense
+    team_def_strength = {k: ((v - min_str) / (max_str - min_str)) * 10 for k,v in team_conceded.items()}
+
+    # Normalization Constants
     all_elements = pd.DataFrame(data['elements'])
     MAX_PPM = all_elements['points_per_game'].astype(float).max()
-    MAX_CS = all_elements['clean_sheets_per_90'].astype(float).max()
     MAX_XGI = all_elements['expected_goal_involvements_per_90'].astype(float).max()
     
     # --- SIDEBAR ---
@@ -147,26 +145,22 @@ def main():
     st.sidebar.divider()
     st.sidebar.header("⚖️ Impact Weights")
     
-    w_budget = st.sidebar.slider(
-        "Price Impact", 0.0, 1.0, 0.5, 
-        help="0.0 = Ignore Price. 1.0 = Full Price Sensitivity.",
-        key="price_weight", on_change=reset_page
-    )
+    w_budget = st.sidebar.slider("Price Impact", 0.0, 1.0, 0.5, key="price_weight", on_change=reset_page)
     
     st.sidebar.divider()
     st.sidebar.subheader("Stat Importance")
 
     # 1. GOALKEEPERS
     with st.sidebar.expander("🧤 Goalkeepers", expanded=False):
-        w_cs_gk = st.slider("Clean Sheet Ability", 0.0, 1.0, 1.0, key="gk_cs", on_change=reset_page)
+        w_cs_gk = st.slider("Defensive Solidity (CS + xGC)", 0.0, 1.0, 1.0, key="gk_cs", on_change=reset_page)
         w_ppm_gk = st.slider("Form (PPM)", 0.0, 1.0, 1.0, key="gk_ppm", on_change=reset_page)
         w_fix_gk = st.slider("Fixture Ease", 0.0, 1.0, 1.0, key="gk_fix", on_change=reset_page)
         gk_weights = {'cs': w_cs_gk, 'ppm': w_ppm_gk, 'fix': w_fix_gk}
 
     # 2. DEFENDERS
     with st.sidebar.expander("🛡️ Defenders", expanded=False):
-        w_cs_def = st.slider("Clean Sheet Ability", 0.0, 1.0, 1.0, key="def_cs", on_change=reset_page)
-        w_xgi_def = st.slider("Attacking Threat", 0.0, 1.0, 1.0, key="def_xgi", on_change=reset_page)
+        w_cs_def = st.slider("Defensive Solidity (CS + xGC)", 0.0, 1.0, 1.0, key="def_cs", on_change=reset_page)
+        w_xgi_def = st.slider("Attacking Threat (xGI)", 0.0, 1.0, 1.0, key="def_xgi", on_change=reset_page)
         w_ppm_def = st.slider("Form (PPM)", 0.0, 1.0, 1.0, key="def_ppm", on_change=reset_page)
         w_fix_def = st.slider("Fixture Ease", 0.0, 1.0, 1.0, key="def_fix", on_change=reset_page)
         def_weights = {'cs': w_cs_def, 'xgi': w_xgi_def, 'ppm': w_ppm_def, 'fix': w_fix_def}
@@ -198,67 +192,87 @@ def main():
             tid = p['team']
             
             # --- CONTEXT ENGINE ---
-            # 1. FUTURE: Opportunity (Opponent Weakness)
-            # GK/DEF want Weak Opponent Attack.
-            # MID/FWD want Weak Opponent Defense.
             if pos_category in ["GK", "DEF"]:
-                fut_sched = team_schedule[tid]['fut_opp_att']
+                fut_sched = team_schedule[tid]['opp_att']
                 past_sched = team_schedule[tid]['past_opp_att']
-                fixture_score = get_fixture_score(fut_sched, limit=horizon_option)
             else:
-                fut_sched = team_schedule[tid]['fut_opp_def']
+                fut_sched = team_schedule[tid]['opp_def']
                 past_sched = team_schedule[tid]['past_opp_def']
-                fixture_score = get_fixture_score(fut_sched, limit=horizon_option)
-            
-            # 2. PAST: Resistance (Opponent Strength)
-            # Calculate multiplier: Did they play tough teams?
+                
+            fixture_score = get_fixture_score(fut_sched, limit=horizon_option)
             resistance_mult = get_resistance_factor(past_sched)
-
-            display_fixtures = ", ".join(team_schedule[tid]['fut_disp'][:horizon_option])
+            
+            display_fixtures = ", ".join(team_schedule[tid]['display'][:horizon_option])
 
             try:
                 price = p['now_cost'] / 10.0
                 price = 4.0 if price <= 0 else price
                 
                 raw_ppm = float(p['points_per_game'])
-                raw_cs = float(p['clean_sheets_per_90'])
-                raw_xgi = float(p.get('expected_goal_involvements_per_90', 0))
+                
+                # --- COMPOSITE STATS ---
+                
+                if pos_category in ["GK", "DEF"]:
+                    # 1. DEFENSIVE SOLIDITY COMPOSITE
+                    raw_cs = float(p['clean_sheets_per_90'])
+                    raw_xgc = float(p.get('expected_goals_conceded_per_90', 0))
+                    
+                    # Invert xGC: Lower is better. 
+                    # A value of 2.5 is terrible (score 0). A value of 0.5 is elite (score 2.0).
+                    inv_xgc = max(0, 2.5 - raw_xgc)
+                    
+                    # Blend: CS (Result) + xGC (Underlying) + Team Strength (Structure)
+                    # This creates a robust metric that rewards good performances even if CS was lost
+                    comp_def_val = (raw_cs * 20) + (inv_xgc * 3) + (team_def_strength[tid] * 0.5)
+                    
+                    # Apply Past Context: Did they have low xGC against City? Reward them.
+                    adj_def = comp_def_val * resistance_mult
+                    
+                    # Normalize (Find Max later or use rough estimate for 0-10 scale)
+                    # We'll assume a perfect score is around 25.0
+                    score_def = min(10, (adj_def / 25.0) * 10)
+                    
+                    # Attacking Threat for Def
+                    raw_xgi = float(p.get('expected_goal_involvements_per_90', 0))
+                    adj_xgi = raw_xgi * resistance_mult
+                    score_xgi = (adj_xgi / MAX_XGI) * 10 if MAX_XGI > 0 else 0
+                    
+                    stat_disp = raw_cs # Show CS as primary visual
+                    
+                else:
+                    # ATTACKING COMPOSITE
+                    raw_xgi = float(p.get('expected_goal_involvements_per_90', 0))
+                    adj_xgi = raw_xgi * resistance_mult
+                    score_xgi = (adj_xgi / MAX_XGI) * 10 if MAX_XGI > 0 else 0
+                    stat_disp = raw_xgi
 
-                # --- APPLY CONTEXT ---
-                # Adjust the stats based on Past Resistance
-                # If Resistance > 1.0 (Hard Past), Stats get Boosted (True ability is higher)
-                # If Resistance < 1.0 (Easy Past), Stats get Discounted (Flat-track bully)
+                # Common Stats
                 adj_ppm = raw_ppm * resistance_mult
-                adj_cs = raw_cs * resistance_mult
-                adj_xgi = raw_xgi * resistance_mult
-
-                # NORMALIZE (Using Adjusted Stats vs Global Max)
                 score_ppm = (adj_ppm / MAX_PPM) * 10
-                score_cs = (adj_cs / MAX_CS) * 10 if MAX_CS > 0 else 0
-                score_xgi = (adj_xgi / MAX_XGI) * 10 if MAX_XGI > 0 else 0
                 score_fix = fixture_score
 
-                # WEIGHTED SUM
+                # --- WEIGHTED SUM ---
                 total_score = 0
+                
                 if pos_category == "GK":
-                    total_score = (score_cs * weights['cs']) + \
+                    total_score = (score_def * weights['cs']) + \
                                   (score_ppm * weights['ppm']) + \
                                   (score_fix * weights['fix'])
+                                  
                 elif pos_category == "DEF":
-                    total_score = (score_cs * weights['cs']) + \
+                    total_score = (score_def * weights['cs']) + \
                                   (score_xgi * weights['xgi']) + \
                                   (score_ppm * weights['ppm']) + \
                                   (score_fix * weights['fix'])
+                                  
                 else: # MID/FWD
                     total_score = (score_xgi * weights['xgi']) + \
                                   (score_ppm * weights['ppm']) + \
                                   (score_fix * weights['fix'])
                 
-                # PRICE ADJUSTMENT
+                # Price Adjustment
                 price_divisor = price ** w_budget
                 roi_index = total_score / price_divisor
-                
-                stat_disp = raw_cs if pos_category in ["GK", "DEF"] else raw_xgi
 
                 candidates.append({
                     "Name": p['web_name'],
@@ -267,8 +281,8 @@ def main():
                     "Key Stat": stat_disp,
                     "Upcoming Fixtures": display_fixtures,
                     "PPM": raw_ppm,
-                    "Past Diff": round(resistance_mult, 2), # Visual check for context
                     "Fix Score": round(fixture_score, 1),
+                    "Past Diff": round(resistance_mult, 2),
                     "Raw Score": roi_index
                 })
             except: continue
@@ -279,7 +293,7 @@ def main():
         df['ROI Index'] = min_max_scale(df['Raw Score'])
         df = df.sort_values(by="ROI Index", ascending=False)
         
-        return df[["ROI Index", "Name", "Team", "Price", "Key Stat", "Upcoming Fixtures", "PPM", "Past Diff", "Fix Score"]]
+        return df[["ROI Index", "Name", "Team", "Price", "Key Stat", "Upcoming Fixtures", "PPM", "Fix Score", "Past Diff"]]
 
     # --- RENDER ---
     def render_tab(p_ids, pos_cat, weights):
@@ -301,8 +315,8 @@ def main():
                 "Key Stat": st.column_config.NumberColumn(stat_label, format="%.2f"),
                 "Upcoming Fixtures": st.column_config.TextColumn("Opponents", width="medium"),
                 "PPM": st.column_config.NumberColumn("Pts/G", format="%.1f"),
-                "Past Diff": st.column_config.NumberColumn("Past Diff", help=">1.0: Played Hard Teams (Stats Boosted). <1.0: Played Easy Teams (Stats Discounted)."),
-                "Fix Score": st.column_config.NumberColumn("Fix Score", help="10 = Easy Future. 0 = Hard Future."),
+                "Fix Score": st.column_config.NumberColumn("Fix Rating", help="10 = Easy. 0 = Hard."),
+                "Past Diff": st.column_config.NumberColumn("Past Ctx", help=">1.0: Good stats against Hard teams (Boosted). <1.0: Good stats against Easy teams (Reduced)."),
             }
         )
         c1, _, c3 = st.columns([1, 2, 1])
