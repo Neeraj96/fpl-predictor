@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="FPL Pro Hybrid 25/26", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="FPL Prediction App powered by AI", page_icon="🤖", layout="wide")
 
 # --- CUSTOM CSS ---
 st.markdown("""
@@ -165,9 +165,7 @@ def calculate_aggressive_multiplier(schedule_list, league_avg, limit, intensity_
     subset = schedule_list[:limit]
     avg_strength = sum(subset) / len(subset)
     ratio = league_avg / avg_strength
-    # Base power: 4 for defense (CS sensitive), 2 for attack
     base_power = 4.0 if mode == "def" else 2.0
-    # Intensity scales the exponent based on user slider
     final_power = base_power * (intensity_weight * 2.0)
     return ratio ** final_power
 
@@ -187,10 +185,10 @@ def min_max_scale(series):
 # =========================================
 
 def main():
-    st.title("🧬 FPL Pro: Hybrid Intelligence")
+    st.title("🤖 FPL Prediction App powered by AI")
     
     # 1. Load & Train
-    with st.spinner("Training Specialist AI Models..."):
+    with st.spinner("Training AI Models..."):
         model_def, feat_def, model_att, feat_att, max_ai_pts, (imp_def, imp_att) = train_dual_models()
     
     if model_def is None:
@@ -208,6 +206,7 @@ def main():
     df['matches_played'] = df['minutes'] / 90
     df = df[df['matches_played'] > 2.0]
     
+    # AI Input Prep
     ai_input = pd.DataFrame()
     ai_input['element_type'] = df['element_type']
     ai_input['was_home'] = 0.5
@@ -229,10 +228,15 @@ def main():
                 ai_input[train_col] = pd.to_numeric(df[api_col], errors='coerce').fillna(0) / df['matches_played']
             
     # --- DUAL PREDICTION ---
-    if model_def: pred_def = model_def.predict(ai_input[feat_def])
-    else: pred_def = 0
-    if model_att: pred_att = model_att.predict(ai_input[feat_att])
-    else: pred_att = 0
+    if model_def:
+        pred_def = model_def.predict(ai_input[feat_def])
+    else:
+        pred_def = 0
+        
+    if model_att:
+        pred_att = model_att.predict(ai_input[feat_att])
+    else:
+        pred_att = 0
     
     df['AI_Points'] = np.where(df['element_type'].isin([1, 2]), pred_def, pred_att)
     
@@ -252,38 +256,26 @@ def main():
     
     st.sidebar.divider()
     st.sidebar.header("⚖️ Weights")
-    
-    # Default Price Sensitivity to 0.0 (Show Best Players first)
     w_budget = st.sidebar.slider("Price Sensitivity", 0.0, 1.0, 0.0)
     
-    # ALL DEFAULTS SET TO 0.5 (Equal Balance)
     with st.sidebar.expander("🧤 GK Settings", expanded=False):
         w_gk = {
-            'ai': st.slider("AI (xGC/Stats)", 0.0, 1.0, 0.5, key="g1"), 
+            'ai': st.slider("AI Stats", 0.0, 1.0, 0.5, key="g1"), 
             'xgc': st.slider("Manual xGC Weight", 0.0, 1.0, 0.5, key="g_xgc"),
             'form': st.slider("Form (PPM)", 0.0, 1.0, 0.5, key="g2"), 
             'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.5, key="g3")
         }
     with st.sidebar.expander("🛡️ DEF Settings", expanded=False):
         w_def = {
-            'ai': st.slider("AI (xGC/Stats)", 0.0, 1.0, 0.5, key="d1"), 
+            'ai': st.slider("AI Stats", 0.0, 1.0, 0.5, key="d1"), 
             'xgc': st.slider("Manual xGC Weight", 0.0, 1.0, 0.5, key="d_xgc"), 
             'form': st.slider("Form (PPM)", 0.0, 1.0, 0.5, key="d2"), 
-            # Removed xGI slider for DEF as requested
             'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.5, key="d4")
         }
     with st.sidebar.expander("⚔️ MID Settings", expanded=False):
-        w_mid = {
-            'ai': st.slider("AI (xG/xA/Stats)", 0.0, 1.0, 0.5, key="m1"), 
-            'form': st.slider("Form (PPM)", 0.0, 1.0, 0.5, key="m2"), 
-            'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.5, key="m3")
-        }
+        w_mid = {'ai': st.slider("AI Stats", 0.0, 1.0, 0.5, key="m1"), 'form': st.slider("Form (PPM)", 0.0, 1.0, 0.5, key="m2"), 'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.5, key="m3")}
     with st.sidebar.expander("⚽ FWD Settings", expanded=False):
-        w_fwd = {
-            'ai': st.slider("AI (xG/xA/Stats)", 0.0, 1.0, 0.5, key="f1"), 
-            'form': st.slider("Form (PPM)", 0.0, 1.0, 0.5, key="f2"), 
-            'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.5, key="f3")
-        }
+        w_fwd = {'ai': st.slider("AI Stats", 0.0, 1.0, 0.5, key="f1"), 'form': st.slider("Form (PPM)", 0.0, 1.0, 0.5, key="f2"), 'fix': st.slider("Fixture Impact", 0.0, 1.0, 0.5, key="f3")}
 
     st.sidebar.divider()
     min_mins = st.sidebar.slider("Min Minutes", 0, 2500, 400)
@@ -293,9 +285,8 @@ def main():
         cands = []
         subset = df[df['element_type'].isin(p_ids) & (df['minutes'] >= min_mins)]
         if subset.empty: return pd.DataFrame()
-        
+
         MAX_PPM = subset['points_per_game'].astype(float).max()
-        if MAX_PPM == 0: MAX_PPM = 1.0
         
         for _, row in subset.iterrows():
             tid = row['team']
@@ -325,10 +316,8 @@ def main():
             
             # 3. BLEND
             if cat in ["GK", "DEF"]:
-                # DEF: AI + xGC + Form
                 base_score = (score_ai * w['ai']) + (score_xgc * w['xgc']) + (score_form * w['form'])
             else:
-                # ATT: AI + Form
                 base_score = (score_ai * w['ai']) + (score_form * w['form'])
             
             # 4. CONTEXT
