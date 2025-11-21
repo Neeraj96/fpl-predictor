@@ -8,7 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="FPL Pro Hybrid 25/26", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="FPL Prediction App powered by AI", page_icon="🤖", layout="wide")
 
 # --- CUSTOM CSS ---
 st.markdown("""
@@ -42,7 +42,6 @@ def load_training_data():
                 if r.status_code == 200:
                     temp_df = pd.read_csv(io.BytesIO(r.content), on_bad_lines='skip', low_memory=False)
                     
-                    # Added 'influence' back for Defenders
                     cols = ['minutes', 'total_points', 'was_home', 'clean_sheets', 
                             'goals_conceded', 'expected_goals', 'expected_assists', 
                             'expected_goals_conceded', 'influence', 'creativity', 'threat', 
@@ -66,6 +65,7 @@ def load_training_data():
             df['element_type'] = df['position'].map(pos_map).fillna(3).astype(int)
         else:
             df['element_type'] = 3
+            
     df['element_type'] = pd.to_numeric(df['element_type'], errors='coerce').fillna(3).astype(int)
     
     return df
@@ -87,11 +87,11 @@ def train_dual_models():
         df_def = df_def[df_def['expected_goals_conceded'] > 0]
 
     # --- MODEL 1: DEFENSIVE SPECIALIST ---
-    # INCLUDED: Influence (Workrate/BPS Proxy) + xGC + Threat/Creativity
+    # INCLUDED: Influence (captures BPS/Workrate/Attacking output for defenders)
     feats_def = [
         'minutes', 'was_home', 'element_type',
         'expected_goals_conceded', 
-        'influence', # <--- ADDED BACK (Key for Defensive Actions)
+        'influence', 
         'threat', 'creativity', 
         'expected_goals', 'expected_assists', 
         'yellow_cards'
@@ -108,7 +108,7 @@ def train_dual_models():
         imp_def = pd.DataFrame()
 
     # --- MODEL 2: ATTACKING SPECIALIST ---
-    # EXCLUDED: Influence (To prevent leakage/double counting G/A)
+    # EXCLUDED: Influence (Prevent leakage)
     feats_att = [
         'minutes', 'was_home', 'element_type',
         'expected_goals', 'expected_assists', 
@@ -190,10 +190,10 @@ def min_max_scale(series):
 # =========================================
 
 def main():
-    st.title("🧬 FPL Pro: Hybrid Intelligence")
+    st.title("🤖 FPL Prediction App powered by AI")
     
     # 1. Load & Train
-    with st.spinner("Training Dual AI Models..."):
+    with st.spinner("Training AI Models..."):
         model_def, feat_def, model_att, feat_att, max_ai_pts, (imp_def, imp_att) = train_dual_models()
     
     if model_def is None:
@@ -216,15 +216,13 @@ def main():
     ai_input['element_type'] = df['element_type']
     ai_input['was_home'] = 0.5
     
-    # MAPPING (Includes Influence now)
+    # MAPPING
     stat_map = {
         'minutes': 'minutes',
         'expected_goals': 'expected_goals_per_90',
         'expected_assists': 'expected_assists_per_90',
         'expected_goals_conceded': 'expected_goals_conceded_per_90',
-        'influence': 'influence', 
-        'creativity': 'creativity', 
-        'threat': 'threat',
+        'influence': 'influence', 'creativity': 'creativity', 'threat': 'threat',
         'yellow_cards': 'yellow_cards'
     }
     
@@ -249,7 +247,7 @@ def main():
     df['AI_Points'] = np.where(df['element_type'].isin([1, 2]), pred_def, pred_att)
     
     # --- UI ---
-    st.sidebar.header("🧠 Dual-Brain Scan")
+    st.sidebar.header("🧠 AI Brain Scan")
     brain_tab1, brain_tab2 = st.sidebar.tabs(["Def", "Att"])
     if not imp_def.empty:
         brain_tab1.caption("Defenders (Incl. Influence):")
@@ -267,18 +265,12 @@ def main():
     w_budget = st.sidebar.slider("Price Sensitivity", 0.0, 1.0, 0.5)
     
     with st.sidebar.expander("🧤 GK Settings", expanded=False):
-        w_gk = {
-            'ai': st.slider("AI (xGC/Infl/Stats)", 0.0, 1.0, 0.6, key="g1"), 
-            'xgc': st.slider("Manual xGC Weight", 0.0, 1.0, 0.8, key="g_xgc"),
-            'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="g2"), 
-            'fix': st.slider("Fixture Impact", 0.0, 1.0, 1.0, key="g3")
-        }
+        w_gk = {'ai': st.slider("AI (xGC/Stats)", 0.0, 1.0, 0.6, key="g1"), 'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="g2"), 'fix': st.slider("Fixture Impact", 0.0, 1.0, 1.0, key="g3")}
     with st.sidebar.expander("🛡️ DEF Settings", expanded=False):
         w_def = {
-            'ai': st.slider("AI (xGC/Infl/Stats)", 0.0, 1.0, 0.6, key="d1"), 
-            'xgc': st.slider("Manual xGC Weight", 0.0, 1.0, 0.8, key="d_xgc"),
+            'ai': st.slider("AI (xGC/Stats)", 0.0, 1.0, 0.6, key="d1"), 
+            'xgc': st.slider("Manual xGC Weight", 0.0, 1.0, 0.8, key="d_xgc"), 
             'form': st.slider("Form (PPM)", 0.0, 1.0, 0.4, key="d2"), 
-            'xgi': st.slider("Att Bonus", 0.0, 1.0, 0.3, key="d3"), 
             'fix': st.slider("Fixture Impact", 0.0, 1.0, 1.0, key="d4")
         }
     with st.sidebar.expander("⚔️ MID Settings", expanded=False):
@@ -293,6 +285,7 @@ def main():
     def run_engine(p_ids, cat, w):
         cands = []
         subset = df[df['element_type'].isin(p_ids) & (df['minutes'] >= min_mins)]
+        
         if subset.empty: return pd.DataFrame()
 
         MAX_PPM = subset['points_per_game'].astype(float).max()
@@ -315,24 +308,19 @@ def main():
             raw_ppm = float(row['points_per_game'])
             score_form = (raw_ppm / MAX_PPM) * 10
             
-            # Manual xGC (GK/DEF only)
-            score_xgc = 0
+            # Blend Scores
+            # Defenders: AI (Base) + xGC (Manual) + Form
             if cat in ["GK", "DEF"]:
+                # Manual xGC Calculation (Inverted)
                 raw_xgc = float(row['expected_goals_conceded_per_90'])
                 score_xgc = max(0, min(10, (2.5 - raw_xgc) * 5))
-            
-            score_bonus = 0
-            if cat == "DEF":
-                xgi = float(row['expected_goal_involvements_per_90'])
-                score_bonus = (xgi * 10) * w['xgi']
-            
-            # BLEND
-            if cat in ["GK", "DEF"]:
-                base_score = (score_ai * w['ai']) + (score_xgc * w['xgc']) + (score_form * w['form']) + score_bonus
+                
+                base_score = (score_ai * w['ai']) + (score_xgc * w['xgc']) + (score_form * w['form'])
             else:
+                # Attackers: AI (Base) + Form
                 base_score = (score_ai * w['ai']) + (score_form * w['form'])
             
-            # CONTEXT
+            # Apply Context
             final_score = base_score * eff_mult
             
             # ROI
