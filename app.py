@@ -148,6 +148,7 @@ def process_fixture_lookups(fixtures, teams_data, horizon):
     # Structure: {team_id: {'opp_att_str': [], 'opp_def_str': [], 'display': []}}
     sched = {t['id']: {'att': [], 'def': [], 'txt': []} for t in teams_data}
     
+    # Only process future fixtures
     future_fix = [f for f in fixtures if not f['finished'] and f['kickoff_time']]
     
     for f in future_fix:
@@ -244,6 +245,10 @@ def main():
     df['matches_played'] = df['minutes'] / 90
     df = df[df['matches_played'] > 2.0]
     
+    # Map Team Names
+    team_map = {t['id']: t['short_name'] for t in teams}
+    df['team_name'] = df['team'].map(team_map)
+    
     # Feature Prep
     df['was_home'] = 0.5
     cols_to_norm = [
@@ -315,7 +320,7 @@ def main():
         sub['norm_form'] = (sub['points_per_game'].astype(float) / max_ppm) * 10
         
         # 3. Calculate Base Score (Vectorized)
-        # FIX: If user sets all ability weights to 0, assume base of 10.0 so fixtures can act
+        # If user sets all ability weights to 0, assume base of 10.0 so fixtures can act
         if cat in ['GK', 'DEF']:
             # xGC Logic: 2.5 -> 0, 0.5 -> 10
             sub['norm_xgc'] = (2.5 - sub['expected_goals_conceded']).clip(lower=0) * 5
@@ -362,14 +367,15 @@ def main():
         # Final Normalize
         sub['ROI Index'] = (sub['roi_raw'] / sub['roi_raw'].max()) * 10
         
-        # Display
-        display = sub[['ROI Index', 'web_name', 'price', 'upcoming', 'points_per_game', 'fix_display_score', stat_col]].sort_values(by='ROI Index', ascending=False).head(50)
+        # Display (Added Team Column)
+        display = sub[['ROI Index', 'web_name', 'team_name', 'price', 'upcoming', 'points_per_game', 'fix_display_score', stat_col]].sort_values(by='ROI Index', ascending=False).head(50)
         
         st.dataframe(
             display, hide_index=True, use_container_width=True,
             column_config={
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
                 "web_name": "Player",
+                "team_name": "Team",
                 "price": st.column_config.NumberColumn("£", format="£%.1f"),
                 "upcoming": st.column_config.TextColumn("Opponents", width="medium"),
                 "points_per_game": st.column_config.NumberColumn("Form", format="%.1f"),
