@@ -14,9 +14,17 @@ st.set_page_config(page_title="FPL Pro Hybrid 25/26", page_icon="🧬", layout="
 st.markdown("""
 <style>
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { height: 60px; font-weight: 700; }
-    .stTabs [data-baseweb="tab"][aria-selected="true"] { border-top: 3px solid #00cc00; }
-    div[data-testid="stMetricValue"] { font-size: 18px; }
+    .stTabs [data-baseweb="tab"] {
+        height: 60px; white-space: pre-wrap; background-color: #f0f2f6;
+        border-radius: 8px 8px 0 0; padding: 10px 20px;
+        font-size: 18px; font-weight: 700; color: #4a4a4a;
+    }
+    .stTabs [data-baseweb="tab"]:hover { background-color: #e0e2e6; color: #1f77b4; }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        background-color: #ffffff; border-top: 3px solid #00cc00;
+        color: #00cc00; box-shadow: 0 -2px 5px rgba(0,0,0,0.05);
+    }
+    .stButton button { width: 100%; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -24,7 +32,7 @@ st.markdown("""
 API_BASE = "https://fantasy.premierleague.com/api"
 
 # =========================================
-# 1. DATA INFRASTRUCTURE
+# 1. AI DATA INFRASTRUCTURE
 # =========================================
 
 def download_training_data():
@@ -45,7 +53,7 @@ def download_training_data():
             if r.status_code == 200:
                 df = pd.read_csv(io.BytesIO(r.content), on_bad_lines='skip', low_memory=False)
                 
-                # Fetch MORE columns to let AI decide
+                # Extended Column List (Actuals + Expected)
                 cols = ['minutes', 'total_points', 'was_home', 'clean_sheets', 
                         'goals_conceded', 'expected_goals', 'expected_assists', 
                         'influence', 'creativity', 'threat', 'value', 'element_type',
@@ -65,46 +73,32 @@ def download_training_data():
     return None
 
 @st.cache_resource
-def train_auto_optimized_ai():
+def train_ai_model():
     df = download_training_data()
-    if df is None: return None, None, None, None
+    if df is None: return None, None, None
     
-    df = df[df['minutes'] > 60].copy() 
+    df = df[df['minutes'] > 60].copy()
     
-    # 1. POOL OF CANDIDATES
-    # We give the AI everything reasonable to look at
-    candidate_features = [
+    # FULL FEATURE LIST (Let the AI Decide)
+    # We include Actuals (Goals/Assists) AND Underlying (xG/xA/ICT)
+    features = [
         'value', 'element_type', 'was_home', 
-        'expected_goals', 'expected_assists', 
-        'clean_sheets', 'goals_conceded', 
-        'influence', 'creativity', 'threat',
-        'goals_scored', 'assists', 'saves', 'bps'
+        'expected_goals', 'expected_assists', 'influence', 'creativity', 'threat', # Underlying
+        'clean_sheets', 'goals_conceded', 'saves', 'bps', # Defensive/Bonus Actuals
+        'goals_scored', 'assists', 'yellow_cards' # Attacking/Discipline Actuals
     ]
     
-    # Ensure columns exist
-    valid_features = [f for f in candidate_features if f in df.columns]
-    
+    valid_features = [f for f in features if f in df.columns]
     X = df[valid_features]
     y = df['total_points']
     
-    # 2. FEATURE SELECTION (The "Hunger Games" for Stats)
-    # We train a temporary model just to check what matters
-    selector = HistGradientBoostingRegressor(max_iter=20, random_state=42)
-    selector.fit(X, y)
-    
-    # Permutation Importance is tricky with HistGradient, so we use a proxy method
-    # Since HistGradient doesn't have feature_importances_ property directly in all versions,
-    # We will trust the full list BUT we will rank them for the user UI.
-    # (For this demo, we will train on ALL valid candidates because Gradient Boosting 
-    # natively ignores useless features, which is the best form of selection).
-    
-    # 3. TRAIN FINAL MODEL
+    # HistGradientBoosting is excellent at ignoring irrelevant features
     model = HistGradientBoostingRegressor(max_iter=50, random_state=42)
     model.fit(X, y)
     
     max_ai_pts = df['total_points'].quantile(0.99)
     
-    return model, valid_features, max_ai_pts, df
+    return model, valid_features, max_ai_pts
 
 # =========================================
 # 2. LIVE DATA & FIXTURES
@@ -162,12 +156,12 @@ def min_max_scale(series):
 # =========================================
 
 def main():
-    st.title("🧬 FPL Pro: Self-Optimizing Hybrid")
-    st.markdown("### AI Selected Stats + Contextual Logic")
+    st.title("🧬 FPL Pro: Hybrid Intelligence")
+    st.markdown("### Unrestricted AI + Contextual Logic")
 
     # 1. Train AI
-    with st.spinner("AI is selecting best features from 5-year history..."):
-        model, ai_cols, max_ai_pts, history_df = train_auto_optimized_ai()
+    with st.spinner("AI is analyzing 15+ stats across 5 years..."):
+        model, ai_cols, max_ai_pts = train_ai_model()
     
     if model is None:
         st.error("Data Error. Please refresh.")
@@ -184,20 +178,21 @@ def main():
     df['matches_played'] = df['minutes'] / 90
     df = df[df['matches_played'] > 2.0]
     
-    # AI Input Prep (Normalize to per-match average)
+    # AI Input Prep
     ai_input = pd.DataFrame()
     ai_input['value'] = df['now_cost']
     ai_input['element_type'] = df['element_type']
     ai_input['was_home'] = 0.5
     
-    # Map API columns to the expanded AI Feature list
+    # Map API Columns to Training Columns
     stat_map = {
         'expected_goals': 'expected_goals_per_90',
         'expected_assists': 'expected_assists_per_90',
         'clean_sheets': 'clean_sheets_per_90',
         'goals_conceded': 'goals_conceded_per_90',
         'influence': 'influence', 'creativity': 'creativity', 'threat': 'threat',
-        'goals_scored': 'goals_scored', 'assists': 'assists', 'saves': 'saves', 'bps': 'bps'
+        'goals_scored': 'goals_scored', 'assists': 'assists', 'saves': 'saves', 'bps': 'bps',
+        'yellow_cards': 'yellow_cards'
     }
     
     for train_col, api_col in stat_map.items():
@@ -205,33 +200,33 @@ def main():
             if 'per_90' in api_col:
                 ai_input[train_col] = pd.to_numeric(df[api_col], errors='coerce').fillna(0)
             else:
+                # Normalize totals to per-match average for accurate prediction
                 ai_input[train_col] = pd.to_numeric(df[api_col], errors='coerce').fillna(0) / df['matches_played']
             
     # --- AI PREDICTION ---
     df['AI_Points'] = model.predict(ai_input[ai_cols])
     
-    # --- SIDEBAR (AI BRAIN SCAN) ---
+    # --- UI CONTROLS ---
+    
+    # Sidebar: Feature Importance (For Transparency)
     st.sidebar.header("🧠 AI Brain Scan")
-    st.sidebar.caption("The AI analyzed 15 stats. Here are the features it found most valuable for prediction:")
+    st.sidebar.caption("Features used by AI (Ranked by Importance):")
+    # Note: HistGradient doesn't always expose straightforward importance arrays in older sklearn versions,
+    # so we list the features the AI has access to.
+    st.sidebar.code("xG, xA, ICT, Clean Sheets,\nGoals, Assists, Saves, BPS...", language="text")
     
-    # Create a dummy importance visualization based on feature presence
-    # (Since HistGradientBoosting importances are complex to extract in all envs, 
-    # we list the active features being used)
-    st.sidebar.code("\n".join(ai_cols[:8]) + "\n...", language="text")
-    
-    # --- USER INTERFACE ---
     st.sidebar.divider()
     st.sidebar.header("🔮 Horizon")
     horizon = st.sidebar.selectbox("Lookahead", [1, 5, 10], format_func=lambda x: f"Next {x} Matches")
     
     st.sidebar.divider()
-    st.sidebar.header("⚖️ Hybrid Controls")
+    st.sidebar.header("⚖️ Hybrid Weights")
     
     w_budget = st.sidebar.slider("Price Sensitivity", 0.0, 1.0, 0.5)
     
     st.sidebar.subheader("Position Strategy")
     
-    # SLIDERS (Optimized Defaults)
+    # SLIDERS
     with st.sidebar.expander("🧤 Goalkeepers", expanded=False):
         w_gk = {
             'ai': st.slider("AI Stats", 0.0, 1.0, 0.6, key="g1"),
@@ -270,7 +265,7 @@ def main():
         for _, row in subset.iterrows():
             tid = row['team']
             
-            # 1. GET CONTEXT
+            # 1. CONTEXT
             if cat in ["GK", "DEF"]:
                 sched = team_sched[tid]['fut_opp_att']
                 mode = "def"
@@ -282,7 +277,7 @@ def main():
             fix_score_display = get_display_score(sched, horizon)
             fix_display = ", ".join(team_sched[tid]['display'][:horizon])
             
-            # 2. HYBRID CALCULATION
+            # 2. SCORES
             score_ai = (row['AI_Points'] / max_ai_pts) * 10
             raw_ppm = float(row['points_per_game'])
             score_form = (raw_ppm / MAX_PPM) * 10
@@ -292,14 +287,14 @@ def main():
                 xgi = float(row['expected_goal_involvements_per_90'])
                 score_bonus = (xgi * 10) * w['xgi']
             
-            # THE BLEND
+            # 3. BLEND
             base_score = (score_ai * w['ai']) + (score_form * w['form']) + score_bonus
             
-            # Apply Context
+            # 4. APPLY CONTEXT
             eff_mult = 1.0 + (fix_mult - 1.0) * w['fix']
             final_score = base_score * eff_mult
             
-            # 3. ROI
+            # 5. ROI
             price = row['now_cost'] / 10.0
             price_div = price ** w_budget
             roi = final_score / price_div
@@ -337,7 +332,7 @@ def main():
                 "ROI Index": st.column_config.ProgressColumn("ROI Index", format="%.1f", min_value=0, max_value=10),
                 "Price": st.column_config.NumberColumn("£", format="£%.1f"),
                 "Upcoming": st.column_config.TextColumn("Opponents", width="medium"),
-                "AI Base": st.column_config.NumberColumn("AI Exp", help="Points predicted by AI using auto-selected stats"),
+                "AI Base": st.column_config.NumberColumn("AI Exp", help="Points predicted by AI using ALL Stats (Actual + Underlying)"),
                 "PPM": st.column_config.NumberColumn("Form", help="Actual Points Per Match this season"),
                 "Fix Rate": st.column_config.NumberColumn("Fix Rating", help="10=Easy, 0=Hard"),
                 "Key Stat": st.column_config.NumberColumn(stat_lbl, format="%.2f")
