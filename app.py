@@ -9,39 +9,12 @@ from sklearn.ensemble import RandomForestRegressor
 # --- CONFIGURATION ---
 st.set_page_config(page_title="FPL Prediction App powered by AI", page_icon="🤖", layout="wide")
 
-# --- CUSTOM CSS (BIG TABS & UI) ---
+# --- CUSTOM CSS ---
 st.markdown("""
 <style>
-    /* Make the Tabs look like big buttons/boxes */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 60px;
-        white-space: pre-wrap;
-        background-color: #f0f2f6;
-        border-radius: 5px;
-        padding: 10px 25px;
-        font-size: 20px; /* Bigger Font */
-        font-weight: 700; /* Bold */
-        color: #31333F;
-        border: 1px solid #d6d6d6;
-        flex-grow: 1; /* Stretch to fill width */
-        justify-content: center;
-    }
-    .stTabs [data-baseweb="tab"]:hover {
-        background-color: #e6e6e6;
-        color: #000000;
-    }
-    .stTabs [data-baseweb="tab"][aria-selected="true"] {
-        background-color: #ffffff;
-        border: 2px solid #00cc00; /* Green highlight */
-        color: #00cc00;
-        border-bottom: 2px solid #00cc00; /* Box style */
-    }
-    
-    /* Metric Alignment */
-    div[data-testid="stMetricValue"] { font-size: 18px; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { height: 60px; font-weight: 700; }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] { border-top: 3px solid #00cc00; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -78,6 +51,7 @@ def load_training_data():
                 r = requests.get(url)
                 if r.status_code == 200:
                     temp = pd.read_csv(io.BytesIO(r.content), on_bad_lines='skip', low_memory=False)
+                    # Select only existing columns from our needed list
                     existing = [c for c in cols_needed if c in temp.columns]
                     all_data.append(temp[existing])
             except: pass
@@ -90,11 +64,14 @@ def load_training_data():
     # --- CRITICAL FIX: ENSURE ELEMENT_TYPE EXISTS ---
     if 'element_type' not in df.columns:
         if 'position' in df.columns:
+            # Map text to ID
             pos_map = {'GK': 1, 'DEF': 2, 'MID': 3, 'FWD': 4, 'GKP': 1}
             df['element_type'] = df['position'].map(pos_map).fillna(3)
         else:
+            # Last resort fallback
             df['element_type'] = 3
             
+    # Force numeric type
     df['element_type'] = pd.to_numeric(df['element_type'], errors='coerce').fillna(3).astype(int)
     
     return df
@@ -104,6 +81,7 @@ def train_dual_models():
     df = load_training_data()
     if df is None: return None, None, None, None, None, None
     
+    # Vectorized Filtering
     if 'minutes' in df.columns:
         df = df[df['minutes'] > 60].copy()
     
@@ -114,6 +92,7 @@ def train_dual_models():
     df_def = df.loc[mask_def].copy()
     df_att = df.loc[mask_att].copy()
     
+    # Clean xGC for Defenders
     if 'expected_goals_conceded' in df_def.columns:
         df_def = df_def[df_def['expected_goals_conceded'] > 0]
 
@@ -123,9 +102,14 @@ def train_dual_models():
     valid_def = [f for f in feats_def if f in df_def.columns]
     
     model_def = None
+    imp_def = pd.DataFrame()
+    
     if len(df_def) > 50:
         model_def = RandomForestRegressor(n_estimators=40, max_depth=10, n_jobs=-1, random_state=42)
         model_def.fit(df_def[valid_def], df_def['total_points'])
+        # Calculate Importance
+        imp_def = pd.DataFrame({'Stat': valid_def, 'Weight': model_def.feature_importances_}).sort_values(by='Weight', ascending=False)
+        imp_def['Weight'] = (imp_def['Weight'] / imp_def['Weight'].sum()) * 100
 
     # --- MODEL 2: ATTACKING ---
     feats_att = ['minutes', 'was_home', 'element_type', 'expected_goals', 'expected_assists', 
@@ -133,13 +117,18 @@ def train_dual_models():
     valid_att = [f for f in feats_att if f in df_att.columns]
     
     model_att = None
+    imp_att = pd.DataFrame()
+    
     if len(df_att) > 50:
         model_att = RandomForestRegressor(n_estimators=40, max_depth=10, n_jobs=-1, random_state=42)
         model_att.fit(df_att[valid_att], df_att['total_points'])
+        # Calculate Importance
+        imp_att = pd.DataFrame({'Stat': valid_att, 'Weight': model_att.feature_importances_}).sort_values(by='Weight', ascending=False)
+        imp_att['Weight'] = (imp_att['Weight'] / imp_att['Weight'].sum()) * 100
     
     max_pts = df['total_points'].quantile(0.99) if 'total_points' in df.columns else 15.0
     
-    return model_def, valid_def, model_att, valid_att, max_pts
+    return model_def, valid_def, model_att, valid_att, max_pts, (imp_def, imp_att)
 
 # =========================================
 # 2. OPTIMIZED LIVE DATA & FIXTURES
@@ -152,27 +141,35 @@ def get_live_data():
     return static, fixtures
 
 def process_fixture_lookups(fixtures, teams_data, horizon):
+    """
+    Pre-calculates fixture multipliers for all teams once.
+    """
     team_map = {t['id']: t['short_name'] for t in teams_data}
     t_stats = {t['id']: {'att_h': t['strength_attack_home'], 'att_a': t['strength_attack_away'],
                          'def_h': t['strength_defence_home'], 'def_a': t['strength_defence_away']} 
                for t in teams_data}
     
+    # Structure: {team_id: {'opp_att_str': [], 'opp_def_str': [], 'display': []}}
     sched = {t['id']: {'att': [], 'def': [], 'txt': []} for t in teams_data}
+    
     future_fix = [f for f in fixtures if not f['finished'] and f['kickoff_time']]
     
     for f in future_fix:
         h, a = f['team_h'], f['team_a']
         
+        # Home Team
         if len(sched[h]['att']) < horizon:
-            sched[h]['att'].append(t_stats[a]['att_a'])
-            sched[h]['def'].append(t_stats[a]['def_a'])
+            sched[h]['att'].append(t_stats[a]['att_a']) # Faces Away Att
+            sched[h]['def'].append(t_stats[a]['def_a']) # Faces Away Def
             sched[h]['txt'].append(f"{team_map[a]}(H)")
             
+        # Away Team
         if len(sched[a]['att']) < horizon:
-            sched[a]['att'].append(t_stats[h]['att_h'])
-            sched[a]['def'].append(t_stats[h]['def_h'])
+            sched[a]['att'].append(t_stats[h]['att_h']) # Faces Home Att
+            sched[a]['def'].append(t_stats[h]['def_h']) # Faces Home Def
             sched[a]['txt'].append(f"{team_map[h]}(A)")
             
+    # Calculate Multipliers
     results = {}
     LEAGUE_AVG = 1080.0
     
@@ -187,9 +184,12 @@ def process_fixture_lookups(fixtures, teams_data, horizon):
             
             raw_diff = (avg_att + avg_def) / 2
             vis_score = max(0, min(10, 10 - ((raw_diff - 950)/400 * 10)))
+            
             display = ", ".join(data['txt'])
         else:
-            ratio_def, ratio_att, vis_score = 1.0, 1.0, 5.0
+            ratio_def = 1.0
+            ratio_att = 1.0
+            vis_score = 5.0
             display = "-"
             
         results[tid] = {
@@ -202,12 +202,16 @@ def process_fixture_lookups(fixtures, teams_data, horizon):
     return results
 
 def calc_vectorized_metrics(df, team_sched_map):
+    """
+    Adds fixture metrics to the dataframe efficiently.
+    """
     fix_mult_def_list = []
     fix_mult_att_list = []
     fix_score_list = []
     display_list = []
     
     for tid in df['team']:
+        # Default to safe values if team ID missing
         data = team_sched_map.get(tid, {'mult_def': 1.0, 'mult_att': 1.0, 'vis_score': 5.0, 'display': '-'})
         fix_mult_def_list.append(data['mult_def'])
         fix_mult_att_list.append(data['mult_att'])
@@ -229,7 +233,7 @@ def main():
     
     # 1. Train
     with st.spinner("Training AI Models..."):
-        model_def, feat_def, model_att, feat_att, max_ai_pts = train_dual_models()
+        model_def, feat_def, model_att, feat_att, max_ai_pts, (imp_def, imp_att) = train_dual_models()
     
     if model_def is None:
         st.warning("⚠️ Downloading Data... (Wait 30s)")
@@ -248,17 +252,8 @@ def main():
     team_name_map = {t['id']: t['short_name'] for t in teams}
     df['team_short'] = df['team'].map(team_name_map)
     
-    # --- ADD STATUS ICONS ---
-    # Mapping: 'a'=Available, 'd'=Doubtful, 'i'/'s'/'u'/'n'=Unavailable
-    status_map = {
-        'a': '✅', 
-        'd': '⚠️', 
-        'i': '❌', 
-        's': '❌', 
-        'u': '❌', 
-        'n': '❌'
-    }
-    # Create a new visual name column: "✅ E.Haaland"
+    # Add Status Icons
+    status_map = {'a': '✅', 'd': '⚠️', 'i': '❌', 's': '❌', 'u': '❌', 'n': '❌'}
     df['status_icon'] = df['status'].map(status_map).fillna('❓')
     df['player_display'] = df['status_icon'] + " " + df['web_name']
     
@@ -291,6 +286,19 @@ def main():
     
     # --- UI ---
     
+    # Sidebar: AI Brain Scan (Restored)
+    st.sidebar.header("🧠 AI Brain Scan")
+    t1, t2 = st.sidebar.tabs(["Def Model", "Att Model"])
+    
+    if not imp_def.empty:
+        t1.caption("Factors for GKs/Defenders:")
+        t1.dataframe(imp_def.head(7).style.format({"Weight": "{:.1f}%"}), hide_index=True)
+        
+    if not imp_att.empty:
+        t2.caption("Factors for Mids/Forwards:")
+        t2.dataframe(imp_att.head(7).style.format({"Weight": "{:.1f}%"}), hide_index=True)
+    
+    st.sidebar.divider()
     st.sidebar.header("🔮 Horizon")
     horizon = st.sidebar.selectbox("Lookahead", [1, 5, 10], format_func=lambda x: f"Next {x} Matches")
     
@@ -316,47 +324,66 @@ def main():
     st.sidebar.divider()
     min_mins = st.sidebar.slider("Min Minutes", 0, 2500, 400)
 
-    # --- ENGINE ---
+    # --- VECTORIZED HYBRID ENGINE ---
     def render_table(pos_ids, cat, weights):
+        # 1. Filter
         sub = df[df['element_type'].isin(pos_ids) & (df['minutes'] >= min_mins)].copy()
         if sub.empty: st.write("No players."); return
         
+        # 2. Normalize Columns (Vectorized)
         max_ppm = sub['points_per_game'].astype(float).max() or 1.0
         
         sub['norm_ai'] = (sub['AI_Points'] / max_ai_pts) * 10
         sub['norm_form'] = (sub['points_per_game'].astype(float) / max_ppm) * 10
         
+        # 3. Calculate Base Score (Vectorized)
         if cat in ['GK', 'DEF']:
+            # xGC Logic: 2.5 -> 0, 0.5 -> 10
             sub['norm_xgc'] = (2.5 - sub['expected_goals_conceded']).clip(lower=0) * 5
             
             sum_weights = weights['ai'] + weights['xgc'] + weights['form']
-            if sum_weights == 0: sub['base'] = 10.0
+            
+            if sum_weights == 0:
+                sub['base'] = 10.0 # Default equal footing
             else:
                 sub['base'] = (sub['norm_ai'] * weights['ai']) + \
                               (sub['norm_xgc'] * weights['xgc']) + \
                               (sub['norm_form'] * weights['form'])
             
+            # Fixture Power (Defenders = Power 4)
             power = 4.0 * (weights['fix'] * 2.0)
             sub['eff_fix'] = sub['fix_mult_def'] ** power
+            
             stat_col = 'expected_goals_conceded'
             stat_fmt = "xGC/90"
         else:
             sum_weights = weights['ai'] + weights['form']
-            if sum_weights == 0: sub['base'] = 10.0
+            
+            if sum_weights == 0:
+                sub['base'] = 10.0 # Default equal footing
             else:
                 sub['base'] = (sub['norm_ai'] * weights['ai']) + \
                               (sub['norm_form'] * weights['form'])
             
+            # Fixture Power (Attackers = Power 2)
             power = 2.0 * (weights['fix'] * 2.0)
             sub['eff_fix'] = sub['fix_mult_att'] ** power
+            
             stat_col = 'expected_goal_involvements_per_90'
             stat_fmt = "xGI/90"
             
+        # 4. Final Calc
         sub['final_score'] = sub['base'] * sub['eff_fix']
+        
+        # Price
         sub['price'] = sub['now_cost'] / 10.0
+        # If w_budget is 0, divisor is 1.
         sub['roi_raw'] = sub['final_score'] / (sub['price'] ** w_budget)
+        
+        # Final Normalize
         sub['ROI Index'] = (sub['roi_raw'] / sub['roi_raw'].max()) * 10
         
+        # Display
         display = sub[['ROI Index', 'player_display', 'team_short', 'price', 'upcoming', 'points_per_game', 'fix_display_score', stat_col]].sort_values(by='ROI Index', ascending=False).head(50)
         
         st.dataframe(
@@ -373,7 +400,7 @@ def main():
             }
         )
 
-    t1, t2, t3, t4 = st.tabs(["🧤 GOALKEEPERS", "🛡️ DEFENDERS", "⚔️ MIDFIELDERS", "⚽ FORWARDS"])
+    t1, t2, t3, t4 = st.tabs(["🧤 GK", "🛡️ DEF", "⚔️ MID", "⚽ FWD"])
     with t1: render_table([1], "GK", ws['GK'])
     with t2: render_table([2], "DEF", ws['DEF'])
     with t3: render_table([3], "MID", ws['MID'])
